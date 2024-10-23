@@ -1,0 +1,2433 @@
+---
+title: "Genome Research manuscript revisions"
+output: html_document
+date: "2024-08-02"
+---
+
+```{r setup, echo = FALSE, message = FALSE, warning = FALSE}
+
+knitr::opts_chunk$set(message = FALSE,        # Hide messages/warnings/errors from loading packages
+                      warning = FALSE,
+                      error = FALSE,
+                      cache = TRUE)           # By default, cache results to avoid re-running
+                                              # super long things every time you knit
+                      
+```
+
+
+# Set up
+
+```{r, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(RColorBrewer)
+library(viridis)
+library(ggpubr)
+library(mosaic)
+library(biomaRt)
+library(gplots)
+library(stringr)
+library(ggbeeswarm)
+library(ComplexUpset)
+
+'%!in%' <- function(x,y)!('%in%'(x,y))
+
+getPalette <-  colorRampPalette(brewer.pal(9, "Spectral"))
+cbPalette <- getPalette(12)
+
+getPalette1 <- colorRampPalette(brewer.pal(8, "Dark2"))
+getPalette2 <- colorRampPalette(brewer.pal(8, "Set2"))
+cbPalette_long <- c(getPalette1(8), getPalette2(8))
+cbPalette_extra_long <- c(getPalette1(12), getPalette2(12))
+
+cbPalette_bi_allelic <- c(cbPalette_long[1],cbPalette_long[9],cbPalette_long[2],cbPalette_long[10],cbPalette_long[3],cbPalette_long[11],cbPalette_long[4],cbPalette_long[12],cbPalette_long[5],cbPalette_long[13],cbPalette_long[6],cbPalette_long[14],cbPalette_long[7],cbPalette_long[15],cbPalette_long[8],cbPalette_long[16])
+
+
+```
+
+
+```{r}
+
+my_custom_theme <-  theme(
+  panel.background = element_rect(fill = "white", colour = "black"),  # White background with black border
+  panel.grid.major = element_blank(),  # Remove major gridlines
+  panel.grid.minor = element_blank(),   # Remove minor gridlines
+  strip.background = element_blank()
+)
+
+```
+
+```{r}
+
+gene_names_df <- read.table("/path/to/annotation_files/hg38_UCSC_refGene_names.txt")
+colnames(gene_names_df) <- c("gene_name","gene_id")
+
+# Threshold determined for Euclidean distance for allele-specific splicing orders
+d_threshold = 0.379
+
+```
+
+
+```{r}
+
+# Get different sample info files (differ based on whether replicates are merged or not and how files are named)
+info_samples_chr <- read.table("/path/to/info.samples.new.txt", sep=",", header=F)
+colnames(info_samples_chr) <- c("sample_name","cell_line","rep","compartment","device","kit")
+
+
+```
+
+```{r}
+
+info_samples_all <- read.table("/path/to/info.samples.new.all.txt", sep=",", header=F)
+colnames(info_samples_all) <- c("sample_name","cell_line","rep","compartment","device","kit")
+
+info_samples_chr_split_rep <- info_samples_all %>% filter(compartment == "chr")
+
+```
+
+```{r}
+
+info_samples_all_v2 <- read.table("/path/to/info.samples.new.all.v2.txt", sep=",", header=F)
+colnames(info_samples_all_v2) <- c("sample_name","cell_line","rep","compartment","device","kit")
+
+```
+
+```{r}
+
+info_samples_merged <- read.table("/path/to/info.samples.merged.txt", sep=",", header=F)
+colnames(info_samples_merged) <- c("sample_name","cell_line","rep")
+
+
+```
+
+# Sequencing statistics
+
+```{r}
+
+# Merge the global stats from all the samples
+stats_df <- do.call(rbind, lapply(info_samples_all$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_global_seq_stats.txt", sep=""), sep="")
+  df = read.table(myDF, header=F, sep=":") %>% mutate(sample_name = paste(x))
+}))
+
+colnames(stats_df) <- c("metric","value","sample_name")
+
+stats_df <- stats_df %>% inner_join(info_samples_all, by=c("sample_name"))
+
+```
+
+```{r}
+
+# Get overall metrics per sequencing kit
+
+stats_df %>% filter(metric %in% c("total reads")) %>% filter(compartment == "chr") %>%
+  group_by(cell_line, rep, compartment, kit) %>% summarise(count = sum(value)) %>% group_by(compartment, kit) %>% summarise(median = median(count), total = sum(count))
+
+```
+
+
+
+
+```{r}
+
+# Reformat for supp table
+
+stats_df_for_supp_table <- stats_df %>% dplyr::select(cell_line, rep, compartment, metric, value, device, kit, sample_name) %>% 
+  spread(metric, value) %>% dplyr::select(cell_line, rep, compartment, device, kit, `total reads`, `uniquely mapped reads`, `fraction uniquely mapped`, median_read_length)
+
+write.table(stats_df_for_supp_table, "/path/to/Tables/Table_S1_stats.rev1.txt", sep="\t", col.names=T, row.names=F, quote=F)
+
+
+```
+
+
+```{r}
+
+# Get overall metrics per compartment
+
+stats_df %>% filter(metric %in% c("total reads")) %>%
+  group_by(cell_line, compartment) %>% summarise(count = sum(value)) %>% group_by(compartment) %>% summarise(median = median(count), total = sum(count))
+
+```
+
+
+```{r}
+
+# Get median read length per compartment
+
+stats_df %>% filter(metric %in% c("median_read_length")) %>%
+  group_by(cell_line, compartment) %>% summarise(med = median(value)) %>% group_by(compartment) %>% summarise(final_med = median(med))
+
+```
+
+
+## Read length per splice status
+
+```{r}
+
+# Merge the read length vs. splice status from all samples
+stats_splice_df <- do.call(rbind, lapply(info_samples_all$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_median_length_per_splice_status.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+stats_splice_df <- stats_splice_df %>% inner_join(info_samples_all, by=c("sample_name"))
+
+```
+
+```{r}
+
+stats_splice_df %>% filter(splicing_status != "all_unspliced") %>%
+  ggplot(aes(x=compartment, y=read_length, color=splicing_status)) + geom_boxplot(outlier.shape = NA) + my_custom_theme + scale_color_manual(values=cbPalette_long) + ylim(0,3000) +
+  geom_quasirandom(cex=0.5, dodge.width=.75)
+
+ggsave("/path/to/Figures/plots/FigS1_read_length_vs_splicing_status_boxplot.pdf",
+       width = 4,
+    height = 2.3,
+    units = c("in"))
+
+```
+
+
+# Proportion of reads assigned to alleles
+
+```{r}
+
+# Merge the read to allele assignment stats from all samples
+read_allele_df <- do.call(rbind, lapply(info_samples_all$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_read_to_allele_stats.txt", sep=""), sep="")
+  df = read.table(myDF, header=F, sep=" ") %>% mutate(sample_name = paste(x))
+}))
+
+colnames(read_allele_df) <- c("allele","read_count","sample_name")
+read_allele_df <- read_allele_df %>% inner_join(info_samples_all, by=c("sample_name"))
+
+# Retrieve total number of uniquely mapped reads
+stats_df_uniq <- stats_df %>% filter(metric == "uniquely mapped reads") %>% 
+  group_by(compartment, cell_line, rep, kit) %>% summarise(uniq_read_count = sum(value))
+
+# Get fraction of assigned reads
+read_allele_df <- read_allele_df %>% filter(allele %in% c("M","P")) %>%
+  group_by(compartment, cell_line, rep, kit) %>% summarise(allele_read_count = sum(read_count)) %>% 
+  inner_join(stats_df_uniq, by=c("cell_line","rep","kit","compartment")) %>% 
+  mutate(fractio_uniq = allele_read_count / uniq_read_count)
+
+```
+
+```{r}
+
+# Get median per compartment
+
+read_allele_df %>% group_by(compartment, cell_line, rep) %>% summarise(sum_fraction = sum(fractio_uniq)) %>% group_by(compartment) %>% summarise(median = median(sum_fraction))
+
+```
+
+
+# Splicing status
+
+```{r}
+
+# Get splicing status counts from all samples
+splice_df <- do.call(rbind, lapply(info_samples_all_v2$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_hg38_read_splicing_status.counts.RefSeq_all.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+
+splice_df <- splice_df %>% inner_join(info_samples_all_v2, by="sample_name") %>%
+  gather(splice_status, count, c("all_spliced","all_unspliced","intermediate")) %>%
+  group_by(compartment, cell_line, rep, splice_status) %>% summarise(total_counts = sum(count)) %>% unite(Name, c("cell_line","rep"), sep="_")
+
+splice_df$splice_status <- factor(splice_df$splice_status, levels=c("all_spliced","intermediate","all_unspliced"))
+
+
+```
+
+
+```{r}
+
+splice_df %>% 
+  ggplot(aes(x=Name, y=total_counts, fill=splice_status)) + geom_bar(stat="identity", position="fill") + my_custom_theme + scale_fill_manual(values=cbPalette_long) + facet_wrap(~compartment, scale="free_x") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggsave("/path/to/Figures/plots/FigS1_proportion_read_splicing_status.pdf",
+       width = 5,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+# Mapping quality
+
+```{r}
+
+# Lorals alignment
+
+lorals_df <- do.call(rbind, lapply(info_samples_chr_split_rep$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_stats_aligned.lorals_alignment.match_per_gene.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+lorals_df <- lorals_df %>% inner_join(info_samples_chr_split_rep, by="sample_name")
+
+# HLA alignment
+
+txtome_df <- do.call(rbind, lapply(info_samples_chr$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_stats_aligned.HLA_nascent_transcriptome.match_per_gene.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+txtome_df <- txtome_df %>% inner_join(info_samples_chr, by="sample_name")
+
+lorals_df$alignment <- "hap_aware"
+txtome_df$alignment <- "txtome"
+
+aln_df <- rbind(lorals_df, txtome_df) %>% separate(gene, c("gene_id"), extra="drop", remove=F, sep="\\.") %>% inner_join(gene_names_df, by="gene_id")
+
+```
+
+```{r}
+
+aln_df %>%
+  ggplot(aes(x=kit, y=match_percent, fill=alignment)) + geom_boxplot(outlier.shape = NA) + my_custom_theme + scale_fill_manual(values=cbPalette_long) + ylim(80,100)
+
+ggsave("/path/to/Figures/plots/FigS7_percent_match_boxplot.pdf",
+       width = 5,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+# Comparison to known AS events
+
+```{r}
+
+# Get AS events overlapping sQTL introns from all samples
+
+AS_df <- do.call(rbind, lapply(info_samples_merged$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_AS_test.sGenes_Gtex.v8.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+
+gtex_df <- read.table("/path/to/annotations/Cells_EBV-transformed_lymphocytes.v8.sgenes.txt", sep="\t", header=T)
+
+```
+
+
+
+```{r}
+
+AS_df_bis <- AS_df %>%
+  mutate(sig = case_when(FDR < 0.05 & abs(delta)>=0.1 ~ "sig",
+         TRUE ~ "not_sig")) %>%
+  inner_join(gtex_df, by="phenotype_id")
+
+AS_df_bis %>%
+  ggplot(aes(x=sig, y=abs(slope))) + geom_boxplot(outlier.size = 0.5) + my_custom_theme
+
+ggsave("/path/to/Figures/plots/FigS1_AS_vs_sQTL_effect_size.pdf",
+       width = 3.5,
+    height = 2.3,
+    units = c("in"))
+
+```
+
+```{r}
+
+# Statistical test
+
+wilcox.test(abs(slope)~sig, data=AS_df_bis, paired=FALSE)
+
+```
+
+
+```{r}
+
+# Compare AS with sequencing depth
+
+stats_df_chr_merged <- stats_df_uniq %>% filter(compartment == "chr") %>% group_by(cell_line) %>% summarise(total_counts = sum(uniq_read_count)/1000000)
+
+AS_df %>%
+  mutate(sig = case_when(FDR < 0.05 & abs(delta)>=0.1 ~ "sig",
+         TRUE ~ "not_sig")) %>% 
+  distinct(cluster, sample_name, sig) %>% group_by(sample_name, sig) %>% summarise(n=n()) %>% group_by(sample_name) %>% mutate(freq = n/sum(n)) %>% filter(sig == "sig") %>% arrange(freq) %>%
+  separate(sample_name, c("cell_line"), extra="drop") %>% inner_join(stats_df_chr_merged[,c("cell_line","total_counts")], by="cell_line") %>%
+  ggplot(aes(x=reorder(cell_line, freq), y=freq, fill=total_counts)) + geom_bar(stat="identity") + my_custom_theme + scale_fill_viridis() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggsave("/path/to/Figures/plots/FigS1_AS_vs_sequencing_depth.pdf",
+       width = 4.5,
+    height = 3,
+    units = c("in"))
+  
+```
+
+
+# Correlation in splicing order between replicates
+
+```{r}
+
+hg38_intron_df <- read.table("/path/to/annotation_files/hg38_all_intron_features.txt", sep="\t", header=T)
+
+hg38_intron_df_simple <- hg38_intron_df %>% dplyr::select(chrom, start, end, gene, intron_pos) %>% distinct()
+
+```
+
+
+```{r}
+
+# Get splicing orders computed for individual replicates
+
+path_df_ind <- do.call(rbind, lapply(info_samples_chr$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_splicing_order_paths_per_allele.hac.all_introns.min10reads.filterND.stringent.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+path_df_ind <- path_df_ind %>% inner_join(info_samples_chr, by="sample_name")
+
+```
+
+```{r}
+
+# Remove duplicate intron groups with same genomic coordinates
+
+remove_duplicate_introns <- function(path_df){
+  
+  nodup_groups <- path_df %>% 
+  dplyr::select(sample_name, gene, gene_name, analyzed_introns) %>% distinct() %>% separate(analyzed_introns, c("int1","int2","int3"), sep="_", convert=T, remove=F) %>%
+  gather(intron, intron_pos, c("int1","int2","int3")) %>% inner_join(hg38_intron_df_simple, by=c("gene","intron_pos")) %>%
+  unite(coord, c("chrom","start","end"), sep="_") %>% dplyr::select(-intron_pos) %>% spread(intron, coord) %>% arrange(gene) %>% distinct(sample_name, int1, int2, int3, .keep_all = T) %>%
+  dplyr::select(sample_name, gene, gene_name, analyzed_introns)
+  
+  path_df_nodup <- path_df %>% inner_join(nodup_groups, by=c("sample_name", "gene","gene_name","analyzed_introns"))
+  
+  return(path_df_nodup)
+}
+
+
+```
+
+```{r}
+
+# Process splicing order data
+
+path_df_ind_nodup <- remove_duplicate_introns(path_df_ind)
+path_df_ind_simple <- path_df_ind_nodup %>% distinct(cell_line, sample_name, rep, gene, gene_name, analyzed_introns, allele, full_path, full_path_score, rank)
+
+```
+
+
+```{r}
+
+# Pivot to have different replicates as columns
+
+path_df_ind_piv1 <- path_df_ind_simple %>% filter(rep %in% c("rep1","rep2")) %>%
+  distinct(cell_line, rep, gene, gene_name, analyzed_introns, allele, full_path, full_path_score) %>% spread(rep, full_path_score) %>% 
+  mutate(comparison = "rep1_vs_rep2") %>% unite(Name, c("cell_line","comparison"), sep=",") %>% filter(!is.na(rep1) & !is.na(rep2))
+
+path_df_ind_piv2 <- path_df_ind_simple %>% filter(rep %in% c("rep1","rep3")) %>%
+  distinct(cell_line, rep, gene, gene_name, analyzed_introns, allele, full_path, full_path_score) %>% spread(rep, full_path_score) %>% 
+  mutate(comparison = "rep1_vs_rep3") %>% unite(Name, c("cell_line","comparison"), sep=",") %>%
+  filter(!is.na(rep1) & !is.na(rep3)) %>% rename(rep2 = rep3)
+
+path_df_ind_piv3 <- path_df_ind_simple %>% filter(rep %in% c("rep2","rep3")) %>%
+  distinct(cell_line, rep, gene, gene_name, analyzed_introns, allele, full_path, full_path_score) %>% spread(rep, full_path_score) %>% 
+  mutate(comparison = "rep2_vs_rep3") %>% unite(Name, c("cell_line","comparison"), sep=",") %>%
+  filter(!is.na(rep2) & !is.na(rep3)) %>% rename(rep1 = rep2, rep2 = rep3)
+
+rbind(path_df_ind_piv1, path_df_ind_piv2, path_df_ind_piv3) %>%
+  ggplot(aes(x=rep1, y=rep2)) + geom_point(size=0.2, alpha=0.5) + my_custom_theme + facet_wrap(~Name) + stat_cor(p.accuracy = 0.001, r.accuracy = 0.01, color="red")
+
+ggsave("/path/to/Figures/plots/FigS1_splicing_order_correlation_all_reps_all_genes.pdf",
+       width = 7,
+    height = 5,
+    units = c("in"))
+
+```
+
+
+
+# Splicing order - merged samples
+
+
+```{r}
+
+# Get results from statistical testing and Euclidean distance done in Python (see jupyter notebook)
+
+diff_order_df <- read.table("/path/to/results_files/LCLs_splicing_order_merged_samples_chi_square_vs_distance_results.txt", sep="\t", header=T)
+
+```
+
+```{r}
+
+# Get all splicing orders per cell line
+
+path_df_merged <- do.call(rbind, lapply(info_samples_merged$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_splicing_order_paths_per_allele.hac.all_introns.min10reads.filterND.stringent.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+
+path_df_nodup <- remove_duplicate_introns(path_df_merged)
+path_df_simple <- path_df_nodup %>% distinct(sample_name, gene, gene_name, analyzed_introns, allele, full_path, full_path_score, rank)
+
+
+```
+
+```{r}
+
+# AS overlapping splicing order intron groups (computed in Python):
+espresso_df <- read.table("/path/to/results_files/espresso_filtered_results_vs_splicing_order_genes.txt", sep="\t", header=T)
+espresso_df_filt <- espresso_df %>% distinct(cell_line, gene_name, gene, analyzed_introns, event, coordinates) %>%
+  filter(!grepl("HLA", gene_name)) %>%
+  unite(AS_event, c("event", "coordinates"), sep="_") %>% 
+  group_by(cell_line, gene_name, gene, analyzed_introns) %>% mutate(AS_rank = rank(AS_event)) %>% spread(AS_rank, AS_event) %>%
+  mutate(`2` = replace_na(`2`, ""), `3` = replace_na(`3`, ""), `4` = replace_na(`4`, ""), `5` = replace_na(`5`, "")) %>%
+  unite(AS_event, c(`1`, `2`,`3`,`4`,`5`), sep=";")
+
+```
+
+
+```{r}
+
+# Make supp table with allele-specific splicing orders
+
+table_S2_splicing_order <- diff_order_df %>% rename(FDR_level1 = level1, FDR_level2 = level2, splicing_order = full_path, splicing_order_score = full_path_score, Euclidean_distance = d) %>% dplyr::select(-analyzed_introns) %>%
+  mutate(allele = case_when(
+    allele == "M" ~ 1,
+    allele == "P" ~ 2
+  )) %>%
+    left_join(espresso_df_filt, by=c("cell_line","gene","gene_name","analyzed_introns"))
+
+write.table(table_S2_splicing_order, "/path/to/Tables/Table_S2_splicing_orders_merged.rev1.txt", sep="\t", col.names=T, row.names=F, quote=F)
+
+```
+
+
+
+```{r}
+
+# Get median and maximum distance
+
+diff_order_df %>% distinct(cell_line, gene_name, gene, analyzed_introns, d) %>% summarise(Med = median(d), Max = max(d))
+
+```
+
+
+
+
+```{r}
+
+# Get number of intron groups per cell line
+
+path_df_simple %>% distinct(sample_name, gene, gene_name, analyzed_introns) %>% group_by(sample_name) %>% summarise(n=n()) %>% arrange(n)
+
+```
+
+```{r}
+
+# Get median number of intron groups per cell line
+
+path_df_simple %>% distinct(sample_name, gene, gene_name, analyzed_introns) %>% group_by(sample_name) %>% summarise(n=n()) %>% ungroup() %>% summarise(Med = median(n))
+
+```
+
+
+```{r}
+
+# Plot splicing order score distributions
+
+path_df_simple %>%
+  ggplot(aes(x=full_path_score, color=factor(rank), fill=factor(rank))) + geom_density(alpha=0.5) + my_custom_theme + scale_color_manual(values=cbPalette_long[9:16]) + scale_fill_manual(values=cbPalette_long[9:16])
+
+ggsave("/path/to/Figures/plots/FigS1_splicing_order_score_distribution_all_cell_lines.pdf",
+       width = 3.5,
+    height = 2,
+    units = c("in"))
+
+```
+
+
+```{r}
+
+# Re-format output for use with DRIM-seq tuQTL
+
+groups_for_tuQTL <- diff_order_df %>% filter(d > d_threshold & (level1 < 0.05 | level2 < 0.05)) %>% distinct(gene_name, gene, analyzed_introns, cell_line) %>%
+  group_by(gene_name, gene, analyzed_introns) %>% summarise(n=n()) %>% filter(n>=2)
+
+
+path_df_spr <- path_df_nodup %>% inner_join(groups_for_tuQTL, by=c("gene_name","gene","analyzed_introns")) %>% distinct(gene_name, gene, analyzed_introns, sample_name, allele, pattern2, count_pattern2) %>%
+  filter(grepl("YES",pattern2) & grepl("NO",pattern2)) %>% spread(pattern2, count_pattern2)
+path_df_spr[is.na(path_df_spr)] <- 0
+
+counts_for_drim <- path_df_spr %>% gather(pattern2, count_pattern2, c(6:11)) %>% arrange(gene_name, gene, analyzed_introns, sample_name, allele, pattern2) %>% separate(sample_name, c("cell_line"), extra="drop", sep="_") %>%
+  mutate(level = case_when(pattern2 %in% c("NO_NO_YES","NO_YES_NO","YES_NO_NO") ~ 1,
+                           pattern2 %in% c("NO_YES_YES","YES_NO_YES","YES_YES_NO") ~ 2)) %>%
+  dplyr::select(cell_line, gene_name,gene,analyzed_introns,allele,level,pattern2,count_pattern2)
+
+write.table(counts_for_drim, "/path/to/results_files/LCLs_merged_interm_counts_per_allele_filtered_min_2_sig_cell_lines.txt", sep="\t", col.names=T, row.names=F, quote=F)
+
+```
+
+
+
+```{r}
+
+#Example intron groups that shows allele-specific differences:
+
+path_df_nodup %>% filter(gene == "NM_005198.4" & analyzed_introns == "6_5_4" & level > 0 & sample_name == "GM18522_chr_merged") %>%
+  ggplot(aes(x=factor(level), y=factor(new_intron_spliced))) + geom_line(aes(group=full_path, linewidth=full_path_score, alpha=full_path_score, color=allele)) + 
+  my_custom_theme + xlab("number of excised introns") + ylab("new intron excised") + ggtitle("CHKB") + facet_wrap(~allele) + scale_color_manual(values=c(cbPalette_long[1],cbPalette_long[3]))
+
+ggsave("/path/to/Figures/plots/Fig1_CHKB_splicing_order_plot.pdf",
+       width = 4.5,
+    height = 2.3,
+    units = c("in"))
+
+
+```
+
+```{r}
+
+path_df_nodup %>% 
+  filter(gene == "NM_001042559.2" & analyzed_introns == "18_17_16" & level > 0 & sample_name == "GM19099_chr_merged") %>%
+  ggplot(aes(x=factor(level), y=factor(new_intron_spliced))) + geom_line(aes(group=full_path, linewidth=full_path_score, alpha=full_path_score, color=allele)) + 
+  my_custom_theme + xlab("number of excised introns") + ylab("new intron excised") + ggtitle("EIF4G2") + facet_wrap(~allele) + scale_color_manual(values=c(cbPalette_long[1],cbPalette_long[3]))
+
+ggsave("/path/to/Figures/plots/Fig1_EIF4G2_splicing_order_plot.pdf",
+       width = 4.5,
+    height = 2.3,
+    units = c("in"))
+
+```
+
+
+
+```{r}
+
+# Plot correlation in splicing order between alleles across cell lines
+
+
+path_df_simple %>% 
+  dplyr::select(-rank) %>% spread(allele, full_path_score) %>% drop_na() %>%
+  ggplot(aes(x=M, y=P)) + geom_point(size=0.2, alpha=0.2) + 
+  my_custom_theme +
+  stat_cor(p.accuracy = 0.001, r.accuracy = 0.01, color="red")
+
+ggsave("/path/to/Figures/plots/Fig1_splicing_order_correlation_alleles_all_cell_lines.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+
+
+```{r}
+
+# Number of intron groups detected across cell lines
+
+path_df_simple %>% distinct(sample_name, gene, gene_name, analyzed_introns) %>% group_by(gene, gene_name, analyzed_introns) %>% summarise(n=n()) %>% 
+  ggplot(aes(x=n)) + stat_ecdf() + my_custom_theme + xlab("number of cell lines") + ylab("proportion of intron groups") +
+  ggtitle("Intron groups detected across cell lines")
+
+ggsave("/path/to/Figures/plots/FigS3_CDF_cell_lines_all_splicing_orders.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+```{r}
+
+path_df_simple %>% filter(gene_name %in% c("HLA-A","HLA-B","HLA-C")) %>% distinct(sample_name, gene, gene_name, analyzed_introns) %>% group_by(gene, gene_name, analyzed_introns) %>% summarise(n=n()) %>% 
+  ggplot(aes(x=n)) + stat_ecdf() + my_custom_theme + xlab("number of cell lines") + ylab("proportion of intron groups") + 
+  ggtitle("Intron groups detected across cell lines in HLA genes")
+
+ggsave("/path/to/Figures/plots/FigS3_CDF_cell_lines_all_splicing_orders_HLA_only.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+```{r}
+
+# Euclidean distance histogram
+
+reps_d_df <- read.table("/path/to/results_files/LCLs_splicing_order_distance_between_reps_all.txt", sep="\t", header=T)
+reps_d_df$category <- "between_reps"
+
+d_threshold = 0.379
+
+d_df <- diff_order_df %>% distinct(cell_line, gene, gene_name, analyzed_introns, d) %>%
+  mutate(category = "between_alleles")
+
+fields <- c("category","d")
+
+rbind(d_df[,fields], reps_d_df[,fields]) %>%
+  ggplot(aes(x=d, fill=category)) + geom_density(alpha=0.5) + my_custom_theme + geom_vline(xintercept = d_threshold, linetype = "dotted", color="black") +
+  scale_fill_manual(values=c(cbPalette_long[4],cbPalette_long[16]))
+
+ggsave("/path/to/Figures/plots/Fig1_splicing_order_distance_histogram.pdf",
+       width = 4.5,
+    height = 2.5,
+    units = c("in"))
+
+```
+
+
+```{r}
+
+# Number of intron groups with differences detected across cell lines
+
+diff_order_df %>% filter(d>d_threshold & (level1 < 0.05 | level2 < 0.05)) %>% distinct(cell_line, gene, gene_name, analyzed_introns) %>% group_by(gene, gene_name, analyzed_introns) %>% summarise(n=n()) %>% 
+  ggplot(aes(x=n)) + stat_ecdf() + my_custom_theme + xlab("number of cell lines") + ylab("proportion of intron groups") +
+  ggtitle("Intron groups detected across cell lines")
+
+ggsave("/path/to/Figures/plots/FigS3_CDF_cell_lines_diff_splicing_order.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+```{r}
+
+diff_order_df %>% filter(d>d_threshold & (level1 < 0.05 | level2 < 0.05) & gene_name %in% c("HLA-A","HLA-B","HLA-C")) %>% 
+  distinct(cell_line, gene, gene_name, analyzed_introns) %>% group_by(gene, gene_name, analyzed_introns) %>% summarise(n=n()) %>% 
+  ggplot(aes(x=n)) + stat_ecdf() + my_custom_theme + xlab("number of cell lines") + ylab("proportion of intron groups") +
+  ggtitle("Intron groups detected across cell lines")
+
+ggsave("/path/to/Figures/plots/FigS3_CDF_cell_lines_diff_splicing_order_HLA_genes.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+
+```{r}
+
+# Types of differences between splicing orders
+
+diff_type_df <- diff_order_df %>% filter(d > d_threshold & rank == 1 & (level1 < 0.05 | level2 < 0.05)) %>% dplyr::select(-full_path_score) %>% spread(allele, full_path) %>%
+  separate(M, c("M_1","M_2","M_3"), sep="->", remove=F, convert=T) %>% separate(P, c("P_1","P_2","P_3"), sep="->", remove=F, convert=T) %>%
+  mutate(category = case_when(M_1 != P_1 & M_2 != P_2 & M_3 == P_3 ~ "2_consecutive_positions",
+                              M_1 == P_1 & M_2 != P_2 & M_3 != P_3 ~ "2_consecutive_positions",
+                              M_1 != P_1 & M_2 == P_2 & M_3 != P_3 ~ "first_and_last_positions",
+                              M_1 != P_1 & M_2 != P_2 & M_3 != P_3 ~ "3_positions",
+                              M_1 == P_1 & M_2 == P_2 & M_3 == P_3 ~ "same_order,different_score",
+                              TRUE ~ "other"))
+
+diff_type_df$category <- factor(diff_type_df$category, levels=c("3_positions", "first_and_last_positions", "2_consecutive_positions", "same_order,different_score"))
+
+diff_type_df %>% group_by(category) %>% summarise(n=n()) %>%
+  ggplot(aes(x=category, y=n)) + geom_bar(stat="identity") + my_custom_theme + scale_fill_manual(values=cbPalette_long[9:12]) + coord_flip()
+
+ggsave("/path/to/Figures/plots/Fig1_splicing_order_diff_nature_bar_plot.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+```{r}
+
+diff_type_df %>% group_by(category) %>% summarise(n=n()) %>% mutate(freq=n/sum(n))
+
+```
+
+
+## Comparison to DRIMSeq DTU with replicates
+
+```{r}
+
+# Get DRIMSeq results from each cell line
+
+cell_lines <- info_samples_chr %>% distinct(cell_line)
+
+dtu_df <- do.call(rbind, lapply(cell_lines$cell_line, function(x) {
+  myDF = paste("/path/to/", paste(x, "_differential_genes.tsv", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(cell_line = paste(x))
+}))
+
+
+dtu_df <- dtu_df %>% separate(gene_id, c("gene","analyzed_introns","level"), sep="/", convert=T) %>%
+  separate(gene, c("gene_id"), sep="\\.", extra="drop", remove=F) %>% inner_join(gene_names_df, by="gene_id") %>% dplyr::select(-gene_id)
+
+```
+
+```{r}
+
+# Remove duplicate intron groups
+
+remove_duplicate_introns_drim <- function(df){
+  
+  nodup_groups <- df %>% 
+  dplyr::select(cell_line, gene, gene_name, analyzed_introns) %>% distinct() %>% separate(analyzed_introns, c("int1","int2","int3"), sep="_", convert=T, remove=F) %>%
+  gather(intron, intron_pos, c("int1","int2","int3")) %>% inner_join(hg38_intron_df_simple, by=c("gene","intron_pos")) %>%
+  unite(coord, c("chrom","start","end"), sep="_") %>% dplyr::select(-intron_pos) %>% spread(intron, coord) %>% arrange(gene) %>% distinct(cell_line, int1, int2, int3, .keep_all = T) %>%
+  dplyr::select(cell_line, gene, gene_name, analyzed_introns)
+  
+  df_nodup <- df %>% inner_join(nodup_groups, by=c("cell_line", "gene","gene_name","analyzed_introns"))
+  
+  return(df_nodup)
+}
+
+```
+
+
+```{r}
+
+# Apply function
+dtu_df_nodup <- remove_duplicate_introns_drim(dtu_df)
+
+```
+
+
+```{r}
+
+# Get intron groups with significant DTU
+dtu_df_nodup_sig <- dtu_df_nodup %>% filter(adj_pvalue < 0.05) %>% distinct(cell_line, gene, gene_name, analyzed_introns) %>% 
+  mutate(dtu_ind = "yes")
+
+# Merge with splicing order results from merged replicates and make volcano plot
+diff_order_df %>% left_join(dtu_df_nodup_sig, by=c("cell_line","gene","gene_name","analyzed_introns")) %>%
+  mutate(dtu_ind = replace_na(dtu_ind, "no")) %>%
+  mutate(category = case_when(d>d_threshold & level1<0.05 | level2<0.05 & dtu_ind == "yes" ~ "both",
+                              d>d_threshold & level1<0.05 | level2<0.05 & dtu_ind == "no" ~ "merged_only",
+                              TRUE ~ "Xnonsig")) %>%
+  mutate(min_FDR = pmin(level1, level2)) %>%
+  ggplot(aes(x=d, y=-log10(min_FDR), color=category)) + geom_point(size=1) + my_custom_theme +
+  scale_color_manual(values=c(cbPalette_long[2],cbPalette_long[1],cbPalette_long[8])) + geom_hline(yintercept = -log10(0.05), linetype = "dotted", color="black")
+
+ggsave("/path/to/Figures/plots/Fig1_splicing_order_volcano_plot.pdf",
+       width = 5,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+
+# Allelic vs. allele-agnostic splicing orders
+
+```{r}
+
+# Get allele-agnostic splicing orders
+
+path_df_agn <- do.call(rbind, lapply(info_samples_chr$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_splicing_order_paths_alleles_combined.all_introns.min10reads.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+path_df_agn <- path_df_agn %>% inner_join(info_samples_chr, by="sample_name")
+
+# Remove duplicate groups
+nodup_groups_comb <- path_df_agn %>% 
+  dplyr::select(cell_line, gene, gene_name, analyzed_introns) %>% distinct() %>% separate(analyzed_introns, c("int1","int2","int3"), sep="_", convert=T, remove=F) %>%
+  gather(intron, intron_pos, c("int1","int2","int3")) %>% inner_join(hg38_intron_df_simple, by=c("gene","intron_pos")) %>%
+  unite(coord, c("chrom","start","end"), sep="_") %>% dplyr::select(-intron_pos) %>% spread(intron, coord) %>% arrange(gene) %>% distinct(cell_line, int1, int2, int3, .keep_all = T) %>% 
+  dplyr::select(cell_line, gene, gene_name, analyzed_introns)
+
+
+path_df_agn_nodup <- path_df_agn %>% inner_join(nodup_groups_comb, by=c("cell_line", "gene","gene_name","analyzed_introns"))
+path_df_agn_simple <- path_df_agn_nodup %>% dplyr::select(cell_line, gene, gene_name, analyzed_introns, full_path, full_path_score, rank) %>% distinct()
+
+```
+
+
+```{r}
+
+# Compare allele-agnostic and allelic splicing orders
+
+path_df_avg <- path_df_ind_simple %>% 
+  dplyr::select(-rank) %>% spread(allele, full_path_score) %>% mutate(M = replace_na(M, 0), P = replace_na(P,0)) %>% rowwise() %>%
+  mutate(avg_score = mean(c(M,P))) %>%
+  inner_join(path_df_agn_simple, by=c("cell_line","gene_name","gene","analyzed_introns","full_path"))
+
+path_df_avg %>%
+  ggplot(aes(x=full_path_score, y=avg_score)) + geom_point(size=0.2, alpha=0.2) + my_custom_theme + 
+  stat_cor(p.accuracy = 0.001, r.accuracy = 0.01, color="red")
+
+ggsave("/path/to/Figures/plots/FigS2_splicing_order_agnostic_vs_allelic.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+## Investigation of differences
+
+```{r}
+
+# Get SNPs in genes for which splicing order was computed
+
+snp_df <- read.table("/path/to/LCLs_studied_cell_lines_het_SNPs_phased.genes_splicing_order.per_intron.bed", sep="\t", header=F)
+colnames(snp_df) <- c("chrom_snp","start_snp","end_snp","ID","gene_snp","chrom_intron","start_intron","end_intron","gene_intron","count","strand","overlap")
+
+snp_df_exons <- read.table("/path/to/LCLs_studied_cell_lines_het_SNPs_phased.genes_splicing_order.per_exon.bed", sep="\t", header=F)
+colnames(snp_df_exons) <- c("chrom_snp","start_snp","end_snp","ID","gene_snp","chrom_exon","start_exon","end_exon","name_exon","score","strand","overlap")
+
+vcf_test_het <- read.table("/path/to/LCLs_studied_cell_lines_het_SNPs_phased.genes_splicing_order.extended.vcf", sep="\t", header=F)
+colnames(vcf_test_het) <- c("CHROM","START","ID","REF","ALT","QUAL","FILTER","INFO","FORMAT","GM18870","GM19099","GM19102","GM19223","GM18501","GM18510","GM18853","GM19144","GM19152","GM18522","GM18861","GM19209")
+vcf_test_het <- vcf_test_het %>% dplyr::select(-QUAL, -FILTER, -INFO, -FORMAT) %>% gather(cell_line, genotype,c(6:17)) %>% filter(genotype %in% c("0|1","1|0"))
+
+het_snps_per_cell_line <- vcf_test_het %>% distinct(cell_line, ID)
+
+```
+
+
+```{r}
+
+# Get density of SNPs in introns and exons
+
+hg38_intron_df_simple2 <- hg38_intron_df %>% dplyr::select(gene, intron_pos, count) %>% distinct()
+
+snp_df_filt <- snp_df %>% filter(gene_snp == gene_intron) %>% inner_join(hg38_intron_df_simple2, by=c("gene_intron"="gene","count")) %>% inner_join(het_snps_per_cell_line, by="ID")
+
+snp_df_filt_exons <- snp_df_exons %>% separate("name_exon", c("NM","id","exon","count"), sep="_", extra="drop") %>% unite(gene_exon, c("NM","id"), sep="_") %>% filter(gene_snp == gene_exon) %>% inner_join(het_snps_per_cell_line, by="ID")
+
+snp_counts_introns <- snp_df_filt %>% group_by(cell_line, gene_snp, intron_pos) %>% summarise(n_introns=n())
+snp_counts_introns_all <- snp_counts_introns %>% group_by(cell_line, gene_snp) %>% summarise(n_introns_tot = sum(n_introns))
+snp_counts_exons <- snp_df_filt_exons %>% distinct(cell_line, gene_snp, count) %>% group_by(cell_line, gene_snp) %>% summarise(n_exons=n())
+
+snp_counts <- left_join(snp_counts_introns,snp_counts_exons, by=c("cell_line","gene_snp")) %>% left_join(snp_counts_introns_all,by=c("cell_line","gene_snp")) %>% 
+  mutate(n_exons = replace_na(n_exons, 0), n_introns_tot = replace_na(n_introns_tot, 0))
+
+```
+
+
+```{r}
+
+# Compute allelic ratio and then classify each intron group into different "reasons" for different allelic and allele-agnostic splicing orders
+
+allele_ratio <- path_df_nodup %>% filter(level %in% c(1,2)) %>% distinct(gene, gene_name, analyzed_introns, sample_name, allele, pattern2, count_pattern2) %>%
+  group_by(gene, gene_name, analyzed_introns, sample_name, allele) %>% summarise(count = sum(count_pattern2)) %>%
+  separate(sample_name, c("cell_line"), sep="_", extra="drop") %>%
+  spread(allele, count) %>% mutate(ratio = M / (M+P)) %>%
+  mutate(ratio_bin = case_when(ratio > 0.4 & ratio < 0.6 ~ "0.4-0.6",
+                               TRUE ~ "skewed"))
+
+classif_corr <- path_df_avg %>% separate(full_path, c("splice1","splice2","splice3"), sep="->", remove=F, convert=T) %>% 
+  separate(sample_name, c("cell_line"), sep="_", extra="drop") %>%
+  inner_join(snp_counts, by=c("cell_line","gene"="gene_snp")) %>%
+  filter(splice1 == intron_pos | splice2 == intron_pos | splice3 == intron_pos) %>% 
+  mutate(splice_order = case_when(splice1 == intron_pos ~ "spliced_1st",
+                                  splice2 == intron_pos ~ "spliced_2nd",
+                                  splice3 == intron_pos ~ "spliced_3rd")) %>% dplyr::select(-splice1, -splice2, -splice3, -intron_pos) %>% distinct() %>%
+  spread(splice_order, n_introns) %>%
+  mutate(spliced_1st = replace_na(spliced_1st, 0), spliced_2nd = replace_na(spliced_2nd, 0), spliced_3rd = replace_na(spliced_3rd, 0)) %>%
+  filter(full_path_score > 0.25 | avg_score > 0.25) %>%
+  mutate(delta = full_path_score - avg_score) %>%
+  mutate(delta_bin = case_when(delta < 0.1 & delta > -0.1 ~ "no_diff",
+                               delta >= 0.1 ~ "agnostic higher",
+                               delta <= -0.1 ~ "allelic higher")) %>%
+  inner_join(allele_ratio, by=c("cell_line", "gene","gene_name","analyzed_introns")) %>%
+  mutate(category = case_when(spliced_3rd == 0 ~ "no SNPs in 3rd intron",
+                              spliced_3rd >= 1 & spliced_1st < 2 & spliced_2nd < 2 ~ "SNPs in 3rd intron only",
+                              ratio_bin == "skewed" ~ "skewed expr",
+                              TRUE ~ "other")) %>% filter(delta_bin != "no_diff") %>%
+  group_by(delta_bin, category) %>% summarise(n=n())
+
+
+classif_corr$category <- factor(classif_corr$category, levels=c("skewed expr","no SNPs in 3rd intron","SNPs in 3rd intron only","other"))
+  
+classif_corr %>%
+  ggplot(aes(x=delta_bin, y=n, fill=category)) + geom_bar(stat="identity", position="stack") + my_custom_theme + scale_fill_manual(values=cbPalette_long[9:12])
+
+ggsave("/path/to/Figures/plots/FigS2_splicing_order_agnostic_vs_allelic_bar_plot.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+# Splicing order for intron pairs
+
+
+```{r}
+
+# Get intron pairs results computed in Python (jupyter notebook)
+
+sig_pairs_df <- read.table("/path/to/results_files/LCLs_splicing_order_merged_samples_intron_pairs_Fisher_exact_test_results.txt", sep="\t", header=T)
+
+```
+
+```{r}
+
+# Reformat to write to Supp Data
+
+table_S3_splicing_order_pairs <- sig_pairs_df %>% dplyr::select(-counts_in_order_M, -counts_out_order_M, -counts_in_order_P, -counts_out_order_P) %>%
+  rename(in_order_allele1 = in_order_M, in_order_allele2 = in_order_P)
+
+write.table(table_S3_splicing_order_pairs, "/path/to/Tables/Table_S3_splicing_orders_pairs.rev1.txt", sep="\t", col.names=T, row.names=F, quote=F)
+
+```
+
+
+
+```{r}
+
+# Compare pairs and groups of three introns
+
+fields <- c("gene","gene_name","int1_count","int2_count","FDR","delta","cell_line")
+
+triplets_split <- diff_order_df %>% separate(analyzed_introns, c("int1","int2","int3"), sep="_", convert=T) %>%
+  unite(pair1, c("int1","int2"), sep="_", remove=F) %>% unite(pair2, c("int2","int3"), sep="_", remove=F) %>%
+  mutate(sig_triplets = case_when(d > d_threshold & (level1 < 0.05 | level2 < 0.05) ~ TRUE,
+                         TRUE ~ FALSE)) %>%
+  distinct(cell_line, gene, gene_name, pair1, pair2, sig_triplets) %>%
+  gather(pair, analyzed_introns, c("pair1","pair2")) %>%
+  mutate(detected_triplets = TRUE)
+
+pairs_reformat <- sig_pairs_df %>% unite(analyzed_introns, c("int1_count","int2_count"), sep="_") %>%
+  mutate(sig_pairs = case_when(FDR < 0.05 & abs(delta)>0.1 ~ TRUE,
+                         TRUE ~ FALSE)) %>%
+  distinct(cell_line, gene, gene_name, analyzed_introns, sig_pairs) %>%
+  mutate(detected_pairs = TRUE)
+  
+  
+upset_df_pairs <- full_join(triplets_split,pairs_reformat, by=c("cell_line","gene","gene_name","analyzed_introns")) %>%
+  distinct(cell_line, gene, gene_name, analyzed_introns, sig_triplets, sig_pairs, detected_triplets, detected_pairs)
+upset_df_pairs[is.na(upset_df_pairs)] <- FALSE
+
+my_levels = colnames(upset_df_pairs)[5:ncol(upset_df_pairs)]
+
+upset(upset_df_pairs, my_levels, name='level', width_ratio=0.1)
+
+
+```
+
+```{r}
+
+# Number of pairs that were detected but that were not detected in groups of 3 introns
+
+nrow(upset_df_pairs %>% filter(detected_pairs == T & detected_triplets == F) %>% distinct(gene_name, gene, analyzed_introns))
+
+```
+
+```{r}
+
+# Number of significant pairs that were not detected in groups of 3 introns
+
+nrow(upset_df_pairs %>% filter(sig_pairs == T & detected_triplets == F) %>% distinct(gene_name, gene, analyzed_introns))
+
+```
+
+
+
+# Allele-specific expression
+
+```{r}
+
+# Merge the allelic gene counts from all the samples
+expr_df <- do.call(rbind, lapply(info_samples_all_v2$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_read_counts_per_gene_and_allele.RefSeq.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+expr_df <- expr_df %>% inner_join(info_samples_all_v2, by=c("sample_name")) %>%
+  separate(gene, c("gene_id"), sep="\\.", extra="drop", remove=F) %>% inner_join(gene_names_df, by="gene_id")
+
+```
+
+
+```{r}
+
+# Calculate allelic ratio, filtering out genes with too many undetermined reads
+
+allele_ratio <- expr_df %>% group_by(gene, gene_name, cell_line, allele, compartment) %>% summarise(read_count = sum(readname)) %>%
+  mutate(allele = replace(allele, allele == ".", "undetected")) %>%
+  spread(allele, read_count) %>% mutate(total_alleles = M + P) %>%
+  filter(total_alleles > 20 & M > 2*undetected & P > 2*undetected) %>%
+  mutate(ratio = M / total_alleles) %>% distinct(cell_line, compartment, gene_name, ratio)
+
+```
+
+```{r}
+
+# Compare allelic ratio in the two compartments
+
+allele_ratio_spr <- allele_ratio %>% 
+  spread(compartment, ratio) %>% drop_na() %>% ungroup() %>% distinct(cell_line, gene_name, .keep_all = T)
+
+allele_ratio_spr %>%
+  ggplot(aes(x=chr, y=cyto)) + geom_point(size=0.1, alpha=0.1) + my_custom_theme + xlim(0,1) + ylim(0,1) + 
+  geom_hline(yintercept = 0.5, linetype="dotted") + geom_vline(xintercept = 0.5, linetype="dotted") +
+  stat_cor(p.accuracy = 0.0001, r.accuracy = 0.01, color="red")
+
+ggsave("/path/to/Figures/plots/FigS4_scatter_plot_abundance_chr_vs_cyto.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+```{r}
+
+# Classify genes into different categories based on chromatin and cytoplasmic allelic ratios
+
+allele_ratio_spr %>%
+  mutate(category = case_when(chr > 0.4 & chr < 0.6 & cyto > 0.4 & cyto < 0.6 ~ "stable",
+                              (chr > 0.6 & cyto > 0.6) | (chr < 0.4 & cyto < 0.4) ~ "skew_same_direction",
+                              abs(chr - cyto) < 0.15 ~ "small_diff",
+                              TRUE ~ "other")) %>%
+  ungroup() %>% distinct(gene_name, cell_line, category) %>% group_by(category) %>% summarise(n=n()) %>% mutate(freq = n/sum(n))
+
+```
+
+
+
+```{r}
+
+# Compare allelic ratio on chromatin and in cytoplasm, only for genes with allele-specific splicing order
+
+splicing_order_genes <- diff_order_df %>% filter(d > d_threshold & (level1 < 0.05 | level2 < 0.05)) %>% distinct(cell_line, gene_name)
+
+allele_ratio_spr %>% inner_join(splicing_order_genes, by=c("gene_name","cell_line")) %>% ungroup() %>% distinct(cell_line, gene_name, .keep_all = T) %>% 
+  ggplot(aes(x=chr, y=cyto)) + geom_point(size=0.5, alpha=0.5) + my_custom_theme + xlim(0,1) + ylim(0,1) + 
+  geom_hline(yintercept = 0.5, linetype="dotted") + geom_vline(xintercept = 0.5, linetype="dotted") +
+  stat_cor(p.accuracy = 0.0001, r.accuracy = 0.01, color="red") +
+  geom_text(data = allele_ratio_spr[allele_ratio_spr$gene_name %in% c("RPS2"),], aes(x=chr, y=cyto, label = gene_name), nudge_x = 0.01, nudge_y = 0.01)
+
+ggsave("/path/to/Figures/plots/Fig3_scatter_plot_abundance_chr_vs_cyto_intron_groups_only.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+```{r}
+
+# Repeat without RPS2
+
+allele_ratio_spr %>% inner_join(splicing_order_genes, by=c("gene_name","cell_line")) %>% ungroup() %>% distinct(cell_line, gene_name, .keep_all = T) %>% 
+  filter(gene_name != "RPS2") %>%
+  ggplot(aes(x=chr, y=cyto)) + geom_point(size=0.5, alpha=0.5) + my_custom_theme + xlim(0,1) + ylim(0,1) + 
+  geom_hline(yintercept = 0.5, linetype="dotted") + geom_vline(xintercept = 0.5, linetype="dotted") +
+  stat_cor(p.accuracy = 0.01, r.accuracy = 0.01, color="red")
+
+```
+
+
+
+
+```{r}
+
+# Plot allelic ratios for RPS2
+
+expr_df %>% filter(allele != ".") %>% filter(gene == "NM_002952.3" & cell_line %in% c("GM18501","GM18522","GM18853","GM19099","GM19209")) %>%
+  group_by(gene, gene_name, cell_line, allele, compartment) %>% summarise(read_count = sum(readname)) %>%
+  ggplot(aes(x=cell_line, y=read_count, fill=allele)) + geom_bar(stat="identity", position="fill") + my_custom_theme + facet_wrap(~compartment) + ylab("proportion of reads") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_manual(values=c(cbPalette_long[1],cbPalette_long[3])) + ggtitle("RPS2") +
+    geom_hline(yintercept = 0.5, linetype="dotted")
+
+ggsave("/path/to/Figures/plots/Fig3_RPS2_allelic_ratios.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+```{r}
+
+expr_df %>% filter(allele != ".") %>% filter(gene == "NM_002046.5" & cell_line %!in% c("GM18861","GM19152","GM19209")) %>%
+    group_by(gene, gene_name, cell_line, allele, compartment) %>% summarise(read_count = sum(readname)) %>%
+  ggplot(aes(x=cell_line, y=read_count, fill=allele)) + geom_bar(stat="identity", position="fill") + my_custom_theme + facet_wrap(~compartment) + ylab("proportion of reads") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_manual(values=c(cbPalette_long[1],cbPalette_long[3])) + ggtitle("GAPDH") +
+    geom_hline(yintercept = 0.5, linetype="dotted")
+
+ggsave("/path/to/Figures/plots/Fig3_GAPDH_allelic_ratios.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+```{r}
+
+# Test for allele-specific expression in cytoplasm and output significant results in GAPDH and RPS2
+
+expr_df %>% filter(compartment == "cyto") %>%
+  group_by(gene, gene_name, cell_line, allele) %>% summarise(read_count = sum(readname)) %>%
+  mutate(allele = replace(allele, allele == ".", "undetected")) %>%
+  spread(allele, read_count) %>% mutate(total_alleles = M + P) %>%
+  filter(total_alleles > 20 & M > 2*undetected & P > 2*undetected) %>%
+  mutate(ratio = M / total_alleles) %>% 
+  mutate(pval_binom = binom.test(c(M, P))$p.value) %>%
+  mutate(padj = p.adjust(pval_binom, method="BH")) %>%
+  distinct(cell_line, gene_name, ratio, padj) %>% filter(gene_name %in% c("RPS2","GAPDH")) %>%
+  filter(padj < 0.05 & (ratio < 0.45 | ratio > 0.55))
+
+```
+
+
+## Qllelic results for chromatin RNA
+
+```{r}
+
+# Differential abundance results
+
+cell_lines_Min <- info_samples_all %>% filter(compartment == "chr" & device == "MinION") %>% distinct(cell_line)
+cell_lines_P2 <- info_samples_all %>% filter(compartment == "chr" & device == "P2") %>% distinct(cell_line)
+
+DE_Min <- do.call(rbind, lapply(cell_lines_Min$cell_line, function(x) {
+  myDF = paste("/path/to/", paste(x, "_compare_results.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+DE_P2 <- do.call(rbind, lapply(cell_lines_P2$cell_line, function(x) {
+  myDF = paste("/path/to/", paste(x, "_compare_results.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+
+# calculate allelic ratio instead of fold change, then get the columns corresponding to that and the p-values and combine the two dataframes
+DE_Min_simple <- DE_Min %>% filter(!is.na(FDR_Qllelic)) %>%
+  mutate(R1 = M1 / (M1+P1), R2 = M2 / (M2+P2), R3 = M3/(M3+P3)) %>%
+  distinct(gene, gene_name, FDR_Qllelic, sample_name, R1, R2, R3) %>%
+  gather(rep, ratio, c("R1","R2","R3")) %>% group_by(gene, gene_name, sample_name) %>% mutate(avg_ratio = mean(ratio)) %>%
+  ungroup() %>%
+  distinct(sample_name, gene_name, FDR_Qllelic, avg_ratio)
+
+DE_P2_simple <- DE_P2 %>% filter(!is.na(FDR_Qllelic)) %>%
+  mutate(R1 = M1 / (M1+P1), R2 = M2 / (M2+P2)) %>%
+  distinct(gene, gene_name, FDR_Qllelic, sample_name, R1, R2) %>%
+  gather(rep, ratio, c("R1","R2")) %>% group_by(gene, gene_name, sample_name) %>% mutate(avg_ratio = mean(ratio)) %>%
+  ungroup() %>%
+  distinct(sample_name, gene_name, FDR_Qllelic, avg_ratio)
+
+DE_df <- rbind(DE_Min_simple, DE_P2_simple) %>%
+  mutate(DE_sig = case_when(FDR_Qllelic < 0.05 & (avg_ratio < 0.40 | avg_ratio > 0.60) ~ "yes",
+                         TRUE ~ "no")) %>% rename(cell_line = sample_name)
+
+
+
+```
+
+
+```{r}
+
+# Get Qllelic results if significant for GAPDH and RPS2
+
+DE_df %>% filter(gene_name == "RPS2" & DE_sig == "yes")
+
+```
+
+
+## Read counts for splicing order genes (Fig. S1)
+
+```{r}
+
+# Compare read counts for splicing order genes to other genes with at least 20 reads
+
+splicing_order_genes <- diff_order_df %>% distinct(gene, cell_line) %>% mutate(category = "splicing_order")
+
+expr_df %>% filter(allele != "." & compartment == "chr") %>% left_join(splicing_order_genes, by=c("gene","cell_line")) %>%
+  mutate(category = replace_na(category, "other")) %>%
+  group_by(cell_line, gene, gene_name, category) %>% summarise(count = sum(readname)) %>%
+  filter(count > 20) %>%
+  ggplot(aes(x=cell_line, y=count, fill=category)) + geom_boxplot(outlier.shape=NA) + my_custom_theme + scale_fill_manual(values=cbPalette_long[5:8]) +
+  scale_y_continuous(trans="log10", limits=c(10,10000)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggsave("/path/to/Figures/plots/FigS1_boxplot_splicing_order_genes_read_counts.pdf",
+       width = 5,
+    height = 2.5,
+    units = c("in"))
+  
+
+```
+
+
+# Poly(A) tail length
+
+## Quality control
+
+```{r}
+
+# Merge the poly(A) summary measures (mean, CV) from all the samples
+pA_df <- do.call(rbind, lapply(info_samples_all_v2$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_polyA_summary_measures.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+pA_df <- pA_df %>% inner_join(info_samples_all_v2, by=c("sample_name"))
+
+```
+
+```{r}
+
+# Get median poly(A) tail length in each compartment
+
+pA_df %>% separate(gene, c("gene_id","id"), sep="\\.", remove=F) %>% inner_join(gene_names_df, by="gene_id") %>%
+  distinct(gene_name, sample_name, compartment, pA_avg) %>% 
+  group_by(compartment) %>% summarise(Med=median(pA_avg))
+
+```
+
+
+
+```{r}
+
+# Plot poly(A) distribution between compartments
+
+pA_df %>% separate(gene, c("gene_id","id"), sep="\\.", remove=F) %>% inner_join(gene_names_df, by="gene_id") %>%
+  distinct(gene_name, sample_name, compartment, pA_avg) %>% 
+  ggplot(aes(x=compartment, y=pA_avg)) + geom_violin() + geom_boxplot(outlier.shape = NA) + my_custom_theme +
+  ggtitle("average pA length per gene and allele")
+
+ggsave("/path/to/Figures/plots/Fig_polyA_distribution_between_compartments.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+```{r}
+
+# Plot poly(A) coefficient of variation in each compartment
+
+pA_df %>% separate(gene, c("gene_id","id"), sep="\\.", remove=F) %>% inner_join(gene_names_df, by="gene_id") %>%
+  distinct(gene_name, sample_name, compartment, pA_CV) %>% 
+  ggplot(aes(x=compartment, y=pA_CV)) + geom_violin() + geom_boxplot(outlier.shape = NA) + my_custom_theme +
+  ggtitle("pA length CV per gene and allele")
+
+ggsave("/path/to/Figures/plots/Fig_polyA_CV_between_compartments.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+```{r}
+
+# Check correlation between replicates
+# Pivot to have different replicates as columns
+
+pA_df_piv_1 <- pA_df %>% filter(compartment == "chr" & rep %in% c("rep1","rep2")) %>% 
+  separate(gene, c("gene_id","id"), sep="\\.", remove=F) %>% inner_join(gene_names_df, by="gene_id") %>%
+  distinct(cell_line, rep, gene_name, gene, pA_avg) %>% 
+  spread(rep, pA_avg) %>% filter(!is.na(rep1) & !is.na(rep2)) %>% mutate(comparison = "rep1/rep2") %>% unite(Name, c("cell_line","comparison"), sep=" ")
+
+pA_df_piv_2 <- pA_df %>% filter(compartment == "chr" & rep %in% c("rep1","rep3")) %>% 
+  separate(gene, c("gene_id","id"), sep="\\.", remove=F) %>% inner_join(gene_names_df, by="gene_id") %>%
+  distinct(cell_line, rep, gene_name, gene, pA_avg) %>%
+  spread(rep, pA_avg) %>% filter(!is.na(rep1) & !is.na(rep3)) %>% mutate(comparison = "rep1/rep3") %>% unite(Name, c("cell_line","comparison"), sep=" ") %>% rename(rep2 = rep3)
+
+pA_df_piv_3 <- pA_df %>% filter(compartment == "chr" & rep %in% c("rep2","rep3")) %>% 
+  separate(gene, c("gene_id","id"), sep="\\.", remove=F) %>% inner_join(gene_names_df, by="gene_id") %>%
+  distinct(cell_line, rep, gene_name, gene, pA_avg) %>%
+  spread(rep, pA_avg) %>% filter(!is.na(rep2) & !is.na(rep3)) %>% mutate(comparison = "rep2/rep3") %>% unite(Name, c("cell_line","comparison"), sep=" ") %>% rename(rep1 = rep2, rep2 = rep3)
+
+rbind(pA_df_piv_1, pA_df_piv_2, pA_df_piv_3) %>% distinct(gene_name, Name, .keep_all = T) %>%
+  ggplot(aes(x=rep1, y=rep2)) + geom_point(size=0.1, alpha=0.02) + my_custom_theme + facet_wrap(~Name) + 
+  stat_cor(aes(label = ..r.label..), r.accuracy = 0.01, color="red", size=3) +
+  my_custom_theme +
+  geom_abline(color="blue", linetype="dotted") + xlab("poly(A) tail length (nt) - first replicate") + ylab("poly(A) tail length - second replicate")
+
+ggsave("/path/to/Figures/plots/Fig_polyA_correlation_between_replicates.png",
+       width = 7,
+    height = 5,
+    units = c("in"))
+
+```
+
+```{r}
+
+# PCA with poly(A) tail lengths
+# Prepare matrix
+pA_mat <- pA_df %>% distinct(gene, pA_avg, sample_name) %>%
+  spread(sample_name, pA_avg) %>% drop_na()
+rownames(pA_mat) <- pA_mat$gene
+pA_mat$gene <- NULL
+
+# Perform PCA
+pca <- prcomp(t(pA_mat))
+percentVar <- pca$sdev ^ 2 / sum(pca$sdev ^ 2)
+
+data.pca <- data.frame('PC1' = pca$x[, 'PC1'],
+                       'PC2' = pca$x[, 'PC2'],
+                       'sample_name' = colnames(pA_mat))
+
+# Plot PCA, coloured by condition
+data.pca_bis <- data.pca %>%
+  inner_join(info_samples_all_v2, by="sample_name")
+
+data.pca_bis %>%
+  ggplot(aes(x=PC1, y=PC2, colour=cell_line, shape=compartment)) + geom_point(size=2) + 
+  my_custom_theme + theme(text = element_text(size=14), panel.border = element_rect(fill = NA, colour = "black")) + 
+  xlab(paste0("PC1: ", round(percentVar[1] * 100), "% variance")) + ylab(paste0("PC2: ", round(percentVar[2] * 100), "% variance")) +
+  scale_color_manual(values=cbPalette_long)
+
+ggsave("/path/to/Figures/plots/FigS5_polyA_PCA.pdf",
+       width = 5,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+## Poly(A) between alleles
+
+```{r}
+
+# Get sample_info (formatted a bit differently for polyA files)
+
+info_samples_pA <- read.table("/path/to/info.samples.new.pA.txt", sep=",", header=F)
+colnames(info_samples_pA) <- c("sample_name","cell_line","rep","compartment","device","kit")
+
+```
+
+```{r}
+
+# Merge the poly(A) comparison from all the samples
+pA_allele_df <- do.call(rbind, lapply(info_samples_pA$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_polyA_comparison_between_alleles.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+pA_allele_df <- pA_allele_df %>% inner_join(info_samples_pA, by=c("sample_name")) %>%
+  separate(gene, c("gene_id"), sep="\\.", extra="drop", remove=F) %>% inner_join(gene_names_df, by="gene_id") %>%
+  mutate(delta = abs(P_mean - M_mean))
+
+```
+
+
+```{r}
+
+# Get significant poly(A) tail lengths (i.e. if significant in all replicates for P2 or in merged replicates for MinION)
+
+sig_genes_pA <- pA_allele_df %>% filter(FDR < 0.05) %>%
+  group_by(gene, cell_line, compartment, device) %>% summarise(n=n()) %>%
+  filter((n==2 & device == "P2") | (n==1 & device == "MinION"))
+
+```
+
+
+```{r}
+
+# Format for Supp Table
+
+pA_df_for_supp <- pA_allele_df %>% 
+  left_join(sig_genes_pA, by=c("cell_line","gene","compartment")) %>%
+  mutate(category = case_when(compartment == "cyto" & FDR < 0.05 ~ "sig",
+                              compartment == "chr" & !is.na(n) ~ "sig",
+                                      TRUE ~ "not_sig")) %>%
+  filter(category == "sig") %>%
+  dplyr::select(cell_line, sample_name, compartment, gene_name, M_count, P_count, M_mean, P_mean, delta, pvalue, FDR) %>%
+  mutate(count_ratio = M_count / (M_count+P_count)) %>%
+  rename(allele1_count = M_count, allele2_count = P_count, allele1_mean = M_mean, allele2_mean = P_mean, diff_between_alleles = delta)
+
+write.table(pA_df_for_supp, "/path/to/Tables/TableS5_polyA_results.txt", sep="\t", col.names=T, row.names=F, quote=F)
+
+```
+
+```{r}
+
+# Get number of significant genes/cell lines
+
+pA_allele_df %>% left_join(sig_genes_pA, by=c("cell_line","gene","compartment")) %>%
+  mutate(category = case_when(compartment == "cyto" & FDR < 0.05 ~ "sig",
+                              compartment == "chr" & !is.na(n) ~ "sig",
+                                      TRUE ~ "not_sig")) %>%
+  filter(category == "sig") %>% distinct(cell_line, gene_name, compartment, category) %>%
+  group_by(compartment) %>% summarise(n=n())
+
+```
+
+```{r}
+
+# Plot correlation in poly(A) tail length difference between different chemistries for significant genes
+
+pA_allele_df %>% left_join(sig_genes_pA, by=c("cell_line","gene","compartment")) %>%
+  mutate(category = case_when(compartment == "cyto" & FDR < 0.05 ~ "sig",
+                              compartment == "chr" & !is.na(n) ~ "sig",
+                                      TRUE ~ "not_sig")) %>%
+  filter(category == "sig" & compartment == "chr") %>% distinct(gene_name, gene, delta, cell_line, kit) %>% spread(kit, delta) %>% drop_na() %>%
+  distinct(gene_name, cell_line, RNA002, RNA004) %>%
+  ggplot(aes(x=RNA002, y=RNA004)) + geom_point() +
+  stat_cor(aes(label = ..r.label..), r.accuracy = 0.01, color="red") +
+  my_custom_theme
+
+ggsave("/path/to/Figures/plots/FigS5_polyA_correlation_between_chemistries.pdf",
+       width = 4,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+```{r}
+
+# Get proportion of genes that have > 200 reads, for genes that show significant differences and those that don't
+
+pA_allele_df %>% left_join(sig_genes_pA, by=c("cell_line","gene","compartment")) %>%
+  mutate(category = case_when(compartment == "cyto" & FDR < 0.05 ~ "sig",
+                              compartment == "chr" & !is.na(n) ~ "sig",
+                                      TRUE ~ "not_sig")) %>%
+  mutate(total_count = M_count + P_count) %>%
+  distinct(cell_line, gene_name, compartment, category, total_count) %>%
+  mutate(expr_level = case_when(total_count > 200 ~ ">200",
+                                TRUE ~ "<200")) %>%
+  group_by(compartment, category, expr_level) %>% summarise(n=n()) %>%
+  group_by(compartment, category) %>% mutate(freq=n/sum(n)) %>%
+  group_by(compartment) %>% mutate(freq=n/sum(n))
+
+```
+
+
+
+```{r}
+
+# Compare the number of genes that show allele-specific poly(A) taill lengths to those that show allele-specific expression
+
+DE_vs_pA_counts <- pA_allele_df %>% filter(compartment == "chr") %>%
+  inner_join(DE_df, by=c("gene_name","cell_line")) %>%
+  left_join(sig_genes_pA, by=c("cell_line","gene","compartment")) %>%
+  mutate(pA_sig = case_when(!is.na(n) ~ "sig",
+                            TRUE ~ "not_sig")) %>% 
+  distinct(gene_name, cell_line, DE_sig, pA_sig) %>%
+  group_by(DE_sig, pA_sig) %>% summarise(n=n())
+  
+DE_vs_pA_counts %>%
+  ggplot(aes(x=pA_sig, y=n, fill=DE_sig)) + geom_bar(stat="identity", position="fill") + my_custom_theme +
+  scale_fill_manual(values=c(cbPalette_long[16],cbPalette_long[2]))
+
+ggsave("/path/to/Figures/plots/Fig4_polyA_analysis_all_vs_sig_genes_counts.pdf",
+       width = 3,
+    height = 3,
+    units = c("in"))
+
+
+```
+
+```{r}
+
+# Plot the difference in poly(A) tail length as a function of the direction of the expression change
+
+pA_allele_df %>% filter(compartment == "chr") %>%
+  inner_join(DE_df, by=c("gene_name","cell_line")) %>%
+  inner_join(sig_genes_pA, by=c("cell_line","gene","compartment")) %>%
+    mutate(high_count_allele_pA = case_when(M_count > P_count ~ M_mean,
+                                          P_count > M_count ~ P_mean),
+         low_count_allele_pA = case_when(M_count < P_count ~ M_mean,
+                                         P_count < M_count ~ P_mean)) %>% 
+  mutate(diff_pA = high_count_allele_pA - low_count_allele_pA,
+         placeholder = "all") %>%
+    mutate(my_color = case_when(gene_name == "RPS2" ~ "RPS2",
+                              gene_name == "ERAP2" ~ "ERAP2",
+                              TRUE ~ "other")) %>%
+  distinct(gene_name, cell_line, sample_name, diff_pA, my_color, rep, placeholder) %>%
+  group_by(gene_name, cell_line, my_color, placeholder) %>% summarise(avg_diff_pA = mean(diff_pA)) %>%
+    ggplot(aes(x=placeholder, y=avg_diff_pA)) + geom_violin() + my_custom_theme + geom_quasirandom(aes(color=my_color), cex=2) + ylim(-150,150) +
+  geom_hline(yintercept = 0, linetype="dotted") + 
+  scale_color_manual(values=c(cbPalette_long[2],cbPalette_long[8],cbPalette_long[6]))
+
+ggsave("/path/to/Figures/plots/Fig4_polyA_analysis_vs_DE_violin_plot.pdf",
+       width = 4,
+    height = 5,
+    units = c("in"))
+  
+
+
+```
+
+## Chromatin vs. cytoplasm
+
+```{r}
+
+# Compare poly(A) tail length in the two compartments
+
+pA_allele_df %>%
+  mutate(pA_diff = M_mean - P_mean) %>% 
+  distinct(cell_line, sample_name, gene, gene_name, compartment, pA_diff) %>% 
+  group_by(cell_line, gene, gene_name, compartment) %>% summarise(avg_pA_diff = mean(pA_diff)) %>%
+  spread(compartment, avg_pA_diff) %>% drop_na() %>%
+  left_join(sig_genes_pA, by=c("gene","cell_line")) %>% ungroup() %>% distinct(cell_line, gene_name, .keep_all = T) %>%
+  mutate(sig = case_when(!is.na(n) ~ "yes",
+                   TRUE ~ "no")) %>%
+  ggplot(aes(x=chr, y=cyto, color=sig)) + geom_point(alpha=0.5, size=0.5) + my_custom_theme +
+  ylim(-60,60) + xlim(-80,80) + stat_cor(p.accuracy = 0.01, r.accuracy = 0.01, color="red") + scale_color_manual(values=c(cbPalette_long[16],cbPalette_long[2]))
+
+ggsave("/path/to/Figures/plots/FigS4_polyA_analysis_chr_vs_cyto_scatterplot.pdf",
+       width = 5,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+## Examples of poly(A) differences
+
+```{r}
+
+# Merge the individual reads from all the samples that show significant differences
+cell_lines_ERAP2 <- info_samples_pA %>% filter(cell_line %in% c("GM19223","GM18853","GM18510","GM19144","GM19152","GM18861"))
+
+pA_allele_ERAP2 <- do.call(rbind, lapply(cell_lines_ERAP2$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_polyA_comparison_between_alleles.individual_reads.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x)) %>% filter(gene == "NM_022350.3")
+}))
+
+pA_allele_ERAP2 <- pA_allele_ERAP2 %>% inner_join(info_samples_pA, by=c("sample_name")) %>%
+  separate(gene, c("gene_id"), sep="\\.", extra="drop", remove=F) %>% inner_join(gene_names_df, by="gene_id")
+
+pA_allele_ERAP2 %>% filter(allele != ".") %>% distinct(readname, polya_length, cell_line, allele) %>%
+  ggplot(aes(x=cell_line, y=polya_length, fill=allele)) + geom_boxplot(outlier.shape = NA) + my_custom_theme + scale_fill_manual(values=c(cbPalette_long[1],cbPalette_long[3])) + geom_quasirandom(cex=0.2, dodge.width=.8, alpha=0.25) + ggtitle("ERAP2")
+
+ggsave("/path/to/Figures/plots/Fig4_polyA_distribution_boxplots_ERAP2.pdf",
+       width = 4,
+    height = 2,
+    units = c("in"))
+
+```
+
+```{r}
+
+# Test difference between alleles for merged replicates using Wilcoxon test
+
+pA_allele_ERAP2 %>% filter(allele != ".") %>% distinct(readname, polya_length, cell_line, allele) %>%
+  group_by(cell_line) %>% summarize(wilcox_p = wilcox.test(polya_length ~ allele)$p.value) %>%
+  ungroup() %>%
+  mutate(padj = p.adjust(wilcox_p, method="BH"))
+
+```
+
+
+
+
+```{r}
+
+# Get average poly(A) tail length per allele
+
+pA_allele_ERAP2 %>% filter(allele != ".") %>% distinct(readname, polya_length, cell_line, allele) %>%
+  group_by(cell_line, allele) %>% summarise(avg = mean(polya_length)) %>% 
+  group_by(allele) %>%
+  summarise(avg2 = mean(avg))
+
+```
+
+
+```{r}
+
+# Get average difference between alleles
+
+pA_allele_ERAP2 %>% filter(allele != ".") %>% distinct(readname, polya_length, cell_line, allele) %>%
+  group_by(cell_line, allele) %>% summarise(avg = mean(polya_length)) %>% spread(allele, avg) %>% mutate(delta = abs(P - M)) %>% ungroup() %>%
+  summarise(avg = mean(delta))
+
+```
+
+
+```{r}
+
+# Merge the individual reads from all the samples that show significant differences
+cell_lines_RPS2 <- info_samples_pA %>% filter(cell_line %in% c("GM18501","GM18853","GM18522","GM19209","GM19099"))
+
+pA_allele_RPS2 <- do.call(rbind, lapply(cell_lines_RPS2$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_polyA_comparison_between_alleles.individual_reads.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x)) %>% filter(gene == "NM_002952.3")
+}))
+
+pA_allele_RPS2 <- pA_allele_RPS2 %>% inner_join(info_samples_pA, by=c("sample_name")) %>%
+  separate(gene, c("gene_id"), sep="\\.", extra="drop", remove=F) %>% inner_join(gene_names_df, by="gene_id")
+
+pA_allele_RPS2 %>% filter(allele != ".") %>% distinct(readname, polya_length, cell_line, allele) %>%
+  ggplot(aes(x=cell_line, y=polya_length, fill=allele)) + geom_boxplot(outlier.shape = NA) + my_custom_theme + scale_fill_manual(values=c(cbPalette_long[1],cbPalette_long[3])) + geom_quasirandom(cex=0.2, dodge.width=.8, alpha=0.25) + ggtitle("RPS2")
+
+ggsave("/path/to/Figures/plots/Fig4_polyA_distribution_boxplots_RPS2.pdf",
+       width = 4,
+    height = 2,
+    units = c("in"))
+
+
+
+```
+
+
+```{r}
+
+# Test difference between alleles for merged replicates using Wilcoxon test
+
+pA_allele_RPS2 %>% filter(allele != ".") %>% distinct(readname, polya_length, cell_line, allele) %>%
+  group_by(cell_line) %>% summarize(wilcox_p = wilcox.test(polya_length ~ allele)$p.value) %>% ungroup() %>%
+  mutate(padj = p.adjust(wilcox_p, method="BH"))
+
+```
+
+
+```{r}
+
+# Get average poly(A) tail length per allele
+
+pA_allele_RPS2 %>% filter(allele != ".") %>% distinct(readname, polya_length, cell_line, allele) %>%
+  group_by(cell_line, allele) %>% summarise(avg = mean(polya_length)) %>% 
+  group_by(allele) %>%
+  summarise(avg2 = mean(avg))
+
+```
+
+```{r}
+
+# Get average difference between alleles
+
+pA_allele_RPS2 %>% filter(allele != ".") %>% distinct(readname, polya_length, cell_line, allele) %>%
+  group_by(cell_line, allele) %>% summarise(avg = mean(polya_length)) %>% spread(allele, avg) %>% mutate(delta = abs(P - M)) %>% ungroup() %>%
+  summarise(avg = mean(delta))
+
+```
+
+
+
+
+# Upset plots for comparing splicing order, poly(A) length, APA and allelic ratio
+
+```{r}
+
+# Get read ends comparison for all samples
+read_ends_df <- do.call(rbind, lapply(info_samples_pA$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_read_ends_polyA_comparison.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+read_ends_df <- read_ends_df %>% inner_join(info_samples_pA, by="sample_name")
+
+```
+
+
+```{r}
+
+# Get genes with significant pA or abundance, but detected in both analyses
+pA_DE_sig <- pA_allele_df %>% filter(compartment == "chr") %>%
+  inner_join(DE_df, by=c("gene_name","cell_line")) %>%
+  left_join(sig_genes_pA, by=c("cell_line","gene","compartment")) %>%
+  mutate(pA_sig = case_when(!is.na(n) ~ TRUE,
+                            TRUE ~ FALSE)) %>%
+  mutate(DE_sig = case_when(DE_sig == "yes" ~ TRUE,
+                            DE_sig == "no" ~ FALSE)) %>%
+  distinct(gene_name, cell_line, pA_sig, DE_sig)
+
+# Get genes with significant APA
+sig_genes_APA <- read_ends_df %>% filter(FDR < 0.05 & compartment == "chr") %>%
+  group_by(gene, cell_line, compartment, device) %>% summarise(n=n()) %>%
+  filter((n==2 & device == "P2") | (n==1 & device == "MinION")) %>% ungroup() %>% distinct(gene, cell_line, n)
+
+read_end_sig <- read_ends_df %>% left_join(sig_genes_APA, by=c("cell_line","gene")) %>% separate(gene, c("gene_id"), sep="\\.", extra="drop") %>%
+  inner_join(gene_names_df, by="gene_id") %>%
+  mutate(read_end = case_when(is.na(n) ~ FALSE,
+                                    !is.na(n) ~ TRUE)) %>%
+  distinct(gene_name, cell_line, read_end)
+
+
+# Get genes with significant splicing order differences
+order_diff <- diff_order_df %>% filter(d>d_threshold & (level1 < 0.05 | level2 < 0.05)) %>% distinct(gene_name, cell_line, d) %>%
+  mutate(splicing_order = TRUE) %>%
+  distinct(gene_name, cell_line, splicing_order)
+
+order_detected <- diff_order_df %>% distinct(gene_name, cell_line, d) %>%
+  mutate(splicing_order_detected = TRUE) %>%
+  distinct(gene_name, cell_line, splicing_order_detected)
+
+
+# Merge all four outputs
+upset_df <- pA_DE_sig %>%
+  left_join(read_end_sig, by=c("gene_name","cell_line")) %>% 
+  left_join(order_diff, by=c("gene_name","cell_line")) %>%
+  mutate(splicing_order = replace_na(splicing_order, FALSE)) %>%
+  left_join(order_detected, by=c("gene_name","cell_line")) %>%
+  mutate(splicing_order_detected = replace_na(splicing_order_detected, FALSE)) %>%
+  filter(pA_sig == T | DE_sig == T | read_end == T | splicing_order == T)
+
+my_levels = colnames(upset_df)[4:ncol(upset_df)-1]
+
+# Make an upset plot
+upset(upset_df, my_levels, name='level', width_ratio=0.1,
+    base_annotations=list(
+        'Intersection size'=intersection_size(
+            counts=TRUE,
+            mapping=aes(fill=splicing_order_detected)
+        ) + scale_fill_manual(values=c(cbPalette_long[16],cbPalette_long[2]))
+        ))
+
+
+ggsave("/path/to/Figures/plots/Fig4_upset_plot_all_metrics.pdf",
+       width = 8,
+    height = 3.5,
+    units = c("in"))
+
+```
+
+
+```{r}
+
+# Save as Supp Table
+
+write.table(upset_df, "/path/to/Tables/TableS6_different_processing_levels_results.txt", sep="\t", col.names=T, row.names=F, quote=F)
+
+```
+
+
+
+## Example of APA
+
+```{r}
+
+# Merge the individual reads from all the samples in which there is APA
+cell_lines_IRF5 <- info_samples_pA %>% filter(cell_line %in% c("GM19223","GM19152","GM19144","GM19102"))
+
+read_ends_IRF5 <- do.call(rbind, lapply(cell_lines_IRF5$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_read_ends_polyA_comparison.individual_reads.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x)) %>% filter(gene == "NM_032643.4")
+}))
+
+read_ends_IRF5 <- read_ends_IRF5 %>% inner_join(info_samples_pA, by="sample_name")
+
+
+read_ends_IRF5 %>% unite(allele_bis, c("cell_line","allele"), sep="_", remove=F) %>%
+  ggplot(aes(x=cell_line, y=start, color=allele)) + geom_quasirandom(cex=1, alpha=0.5, dodge.width=.75) + my_custom_theme + 
+  scale_color_manual(values=c(cbPalette_long[1],cbPalette_long[3])) + ylim(128949000,128950500) + coord_flip() + ggtitle("IRF5")
+
+ggsave("/path/to/Figures/plots/FigS5_read_ends_IRF5.pdf",
+       width = 5,
+    height = 3,
+    units = c("in"))
+
+```
+
+```{r}
+
+# Test for difference between alleles for merged replicates
+
+read_ends_IRF5 %>% group_by(cell_line) %>% summarize(wilcox_p = wilcox.test(start ~ allele)$p.value) %>% ungroup() %>%
+  mutate(padj = p.adjust(wilcox_p, method="BH"))
+
+```
+
+
+
+## Poly(A) vs. splicing
+
+```{r}
+
+# Define samples for analysis
+info_samples_pA_chr <- filter(info_samples_pA, compartment == "chr")
+
+# Get splicing and poly(A) comparison for all samples
+pA_splice_df <- do.call(rbind, lapply(info_samples_pA_chr$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_splicing_polyA_comparison.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+pA_splice_df <- pA_splice_df %>% inner_join(info_samples_pA, by="sample_name")
+
+```
+
+```{r}
+
+# Get significant genes (significant in both replicates for P2, in merged replicates for MinION)
+sig_genes_splice_pA <- pA_splice_df %>% filter(FDR < 0.05) %>%
+  group_by(gene, splice_status, cell_line, compartment, device) %>% summarise(n=n()) %>%
+  filter((n==2 & device == "P2") | (n==1 & device == "MinION"))
+
+# Merge gene-level poly(A) results and splicing-level results
+pA_splice_sig <- pA_splice_df %>% separate(gene, c("gene_id"), sep="\\.", extra="drop", remove=F) %>% inner_join(gene_names_df, by="gene_id") %>%
+  inner_join(sig_genes_splice_pA, by=c("cell_line","gene","splice_status")) %>%
+  distinct(cell_line, gene_name, splice_status, .keep_all = T)
+
+pA_sig <- pA_allele_df %>% filter(compartment == "chr") %>%
+  inner_join(sig_genes_pA, by=c("cell_line","gene")) %>%
+  distinct(cell_line, gene_name, .keep_all = T) %>% mutate(splice_status = "gene_level")
+
+```
+
+
+
+```{r}
+
+fields <- c("cell_line","gene_name","FDR","splice_status")
+
+pA_upset_df <- rbind(pA_splice_sig[,fields], pA_sig[,fields]) %>% mutate(flag = TRUE) %>% dplyr::select(-FDR) %>% spread(splice_status, flag)
+pA_upset_df[is.na(pA_upset_df)] <- FALSE
+
+my_levels = colnames(pA_upset_df)[3:ncol(pA_upset_df)]
+
+upset(pA_upset_df, my_levels, name='level', width_ratio=0.1)
+
+ggsave("/path/to/Figures/plots/Fig4_upset_plot_pA_gene_vs_splicing_levels.pdf",
+       width = 6,
+    height = 4,
+    units = c("in"))
+
+```
+
+
+### Example of poly(A) tail length varying by splicing level
+
+```{r}
+
+# Get poly(A) tail lengths for individual reads in cell line GM19102
+nano_splice_df <- read.table("/path/to/GM19102_chr_merged_splicing_polyA_comparison.individual_reads.txt", sep="\t", header=T)
+
+nano_splice_df$splice_status_all <- factor(nano_splice_df$splice_status_all, levels=c("partially_spliced","all_spliced"))
+
+```
+
+```{r}
+
+# Plot poly(A) tail length as a function of splicing status
+nano_splice_df %>% filter(gene == "NM_006392.3" & allele != ".") %>% dplyr::select(-gene, -overlap) %>% distinct() %>%
+  ggplot(aes(x=splice_status_all, y=polya_length, fill=allele)) + geom_boxplot(outlier.shape = NA) + 
+  my_custom_theme + scale_fill_manual(values=c(cbPalette_long[1],cbPalette_long[3])) + geom_quasirandom(cex=0.2, dodge.width=.8, alpha=0.5) + ggtitle("NOP56")
+
+ggsave("/path/to/Figures/plots/FigS4_polyA_NOP56.pdf",
+       width = 3.5,
+    height = 2.5,
+    units = c("in"))
+
+
+```
+
+# DRIMseq tuQTL
+
+```{r}
+
+# Get DRIMseq tuQTL results
+drim_res <- read.table("/path/to/drimseq_tuQTL._filtered_min2_sig_cell_lines_window500.tsv", sep="\t", header=T)
+
+```
+
+
+```{r}
+
+# Get input genotypes for sig SNPs (allele to genotype correspondence) - computed in jupyter notebook
+
+geno_df <- read.table("/path/to/results_files/DRIMseq_tuQTL_sig_snps.iltered_min2_sig_cell_lines_window500.with_genotypes.txt", sep="\t", header=T)
+geno_df <- geno_df %>% separate(allele, c("cell_line","allele"), sep="_")
+
+
+```
+
+```{r}
+
+# Merge DRIMseq results with splicing orders
+drim_paths_merged <- drim_res %>% arrange(adj_pvalue) %>% filter(adj_pvalue < 0.05) %>%
+  separate(gene_id, c("gene","analyzed_introns","level"), sep="/") %>% separate(gene, c("gene_id"), extra="drop", sep="\\.", remove=F) %>%
+  inner_join(gene_names_df, by="gene_id") %>%
+  inner_join(geno_df, by=c("snp_id"="ID")) %>%
+  inner_join(diff_order_df, by=c("cell_line","allele","gene","gene_name","analyzed_introns"))
+
+```
+
+```{r}
+
+# Get intron groups that were analyzed and that show allele-specific splicing orders
+
+groups_ok <- drim_paths_merged %>% filter(d > d_threshold & (level1 < 0.05 | level2 < 0.05)) %>%
+  distinct(gene_name, gene, analyzed_introns, cell_line) %>% distinct() %>% 
+  group_by(gene_name, gene, analyzed_introns) %>% summarise(n=n()) %>% filter(n>=2)
+
+```
+
+```{r}
+
+# Write results to file
+drim_sig <- drim_res %>% arrange(adj_pvalue) %>% filter(adj_pvalue < 0.05) %>%
+  separate(gene_id, c("gene","analyzed_introns","level"), sep="/") %>% separate(gene, c("gene_id"), extra="drop", sep="\\.", remove=F) %>%
+  inner_join(gene_names_df, by="gene_id") #%>%
+  inner_join(groups_ok, by=c("gene","gene_name","analyzed_introns"))
+
+write.table(drim_sig, "/path/to/Tables/Table_S4_tuQTL.rev1.txt", sep="\t", col.names=T, row.names=F, quote=F)
+
+
+```
+
+
+```{r}
+
+filter(drim_sig, gene_name == "TAP1")
+
+```
+
+
+## Examples
+
+
+```{r}
+
+drim_paths_merged %>% filter(snp_id == "rs4782393" & gene_name == "CYBA" & analyzed_introns == "5_4_3" & full_path %in% c("3->4->5","5->4->3")) %>%
+  distinct(cell_line, genotype, full_path, full_path_score) %>%
+  ggplot(aes(x=factor(genotype), y=full_path_score, color=factor(genotype), shape=cell_line)) + geom_jitter(width = 0.2) + my_custom_theme + scale_color_manual(values=c(cbPalette_long[1],cbPalette_long[3])) + 
+  ylim(-0.1,1) + facet_wrap(~full_path) + scale_shape_manual(values = c(0:12))
+
+ggsave("/path/to/figures/plots/Fig2_SNP_splicing_order_CYBA.pdf",
+       width = 5,
+    height = 1.7,
+    units = c("in"))
+  
+
+```
+
+
+
+```{r}
+
+drim_paths_merged %>% filter(snp_id == "rs75187587" & gene_name == "CHKB" & analyzed_introns == "6_5_4" & full_path %in% c("5->4->6","5->6->4")) %>%
+  distinct(cell_line, genotype, full_path, full_path_score) %>%
+  ggplot(aes(x=factor(genotype), y=full_path_score, color=factor(genotype), shape=cell_line)) + geom_jitter(width = 0.2) + my_custom_theme + scale_color_manual(values=c(cbPalette_long[1],cbPalette_long[3])) + 
+  ylim(-0.1,1.1) + facet_wrap(~full_path) + scale_shape_manual(values = c(0:12))
+
+ggsave("/path/to/figures/plots/Fig2_SNP_splicing_order_CHKB.pdf",
+       width = 5,
+    height = 1.7,
+    units = c("in"))
+  
+
+```
+
+
+
+```{r}
+
+drim_paths_merged %>% filter(snp_id == "rs1957502" & gene_name == "OXA1L" & analyzed_introns == "4_5_6" & full_path %in% c("4->6->5","6->4->5")) %>%
+  distinct(cell_line, genotype, full_path, full_path_score) %>%
+  ggplot(aes(x=factor(genotype), y=full_path_score, color=factor(genotype), shape=cell_line)) + geom_jitter(width = 0.2) + my_custom_theme + scale_color_manual(values=c(cbPalette_long[1],cbPalette_long[3])) + 
+  ylim(-0.1,1.1) + facet_wrap(~full_path) + scale_shape_manual(values = c(0:12))
+
+ggsave("/path/to/figures/plots/Fig2_SNP_splicing_order_OXA1L.pdf",
+       width = 5,
+    height = 1.7,
+    units = c("in"))
+  
+
+```
+
+
+```{r}
+
+drim_paths_merged %>% filter(snp_id == "rs201583180" & gene_name == "EEF1A1" & analyzed_introns == "5_4_3" & full_path %in% c("3->5->4","5->4->3")) %>%
+  distinct(cell_line, genotype, full_path, full_path_score) %>%
+  ggplot(aes(x=factor(genotype), y=full_path_score, color=factor(genotype), shape=cell_line)) + geom_jitter(width = 0.2) + my_custom_theme + scale_color_manual(values=c(cbPalette_long[1],cbPalette_long[3])) + 
+  ylim(-0.1,1) + facet_wrap(~full_path) + scale_shape_manual(values = c(0:12))
+
+ggsave("/path/to/figures/plots/Fig2_SNP_splicing_order_EEF1A1.pdf",
+       width = 5,
+    height = 1.7,
+    units = c("in"))
+  
+
+```
+
+
+
+
+```{r}
+
+drim_paths_merged %>% filter(snp_id == "rs2289367" & gene_name == "CCM2" & analyzed_introns == "6_7_8" & full_path %in% c("6->7->8","8->6->7")) %>%
+  distinct(cell_line, genotype, full_path, full_path_score) %>%
+  ggplot(aes(x=factor(genotype), y=full_path_score, color=factor(genotype), shape=cell_line)) + geom_jitter(width = 0.2) + my_custom_theme + scale_color_manual(values=c(cbPalette_long[1],cbPalette_long[3])) + 
+  ylim(-0.1,1) + facet_wrap(~full_path) + scale_shape_manual(values = c(0:12)) 
+
+ggsave("/path/to/figures/plots/Fig2_SNP_splicing_order_CCM2.pdf",
+       width = 5,
+    height = 1.7,
+    units = c("in"))
+  
+
+```
+
+
+
+```{r}
+
+path_df_merged %>% filter(gene == "NM_002952.3" & analyzed_introns == "5_4_3" & level > 0) %>%
+  ggplot(aes(x=factor(level), y=factor(new_intron_spliced))) + geom_line(aes(group=full_path, size=full_path_score, alpha=full_path_score, color=allele)) + 
+  my_custom_theme + xlab("number of spliced introns") + ylab("new intron spliced") + ggtitle("RPS2") + facet_grid(sample_name~allele) + 
+  scale_color_manual(values=c(cbPalette_long[1],cbPalette_long[3]))
+
+ggsave("/path/to/figures/plots/Fig2_RPS2_splicing_order_all.pdf",
+       width = 6,
+    height = 7,
+    units = c("in"))
+
+```
+
+## Overlap with GTex and Li et al.
+
+```{r}
+
+# Get previously identified sQTL SNPs from GTEx and Li et al. Science 2016
+
+gtex_df <- read.table("/path/to/annotations/Cells_EBV-transformed_lymphocytes.v8.sgenes.txt", sep="\t", header=T)
+
+li_df <- read.table("/path/to/annotations/output_ASintron_PC3.Li2016.sig.SNP_coord.hg38.bed", sep="\t")
+colnames(li_df) <- c("chrom","start","end","cluster")
+
+```
+
+```{r}
+
+snp_coord <- vcf_test_het %>% distinct(CHROM, START, ID)
+
+drim_sig %>% inner_join(snp_coord, by=c("snp_id"="ID")) %>% rowwise() %>%
+  mutate(chrom = paste("chr",CHROM, sep="")) %>%
+  inner_join(gtex_df, by=c("gene_name","chrom"="chr","START"="variant_pos"))
+
+```
+```{r}
+
+drim_sig %>% inner_join(snp_coord, by=c("snp_id"="ID")) %>% rowwise() %>%
+  mutate(chrom = paste("chr",CHROM, sep="")) %>%
+  inner_join(li_df, by=c("chrom","START"="start"))
+
+```
+
+
+
+# HLA genes
+
+## Nascent transcriptome
+
+```{r}
+
+# Merge the splicing orders from all the samples
+HLA_ind_df <- do.call(rbind, lapply(info_samples_chr$sample_name, function(x) {
+  if (!grepl("GM19223",x)){
+       myDF = paste("/path/to/", paste(x, "_splicing_order_paths_per_allele.hac.HLA_transcriptome.min10reads.filterND.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+  }
+}))
+
+HLA_ind_df <- HLA_ind_df %>% inner_join(info_samples_chr, by=c("sample_name"))
+
+```
+
+```{r}
+
+# Get splicing orders from genome alignment
+HLA_ind_df_simple <- HLA_ind_df %>% dplyr::select(kit, cell_line, sample_name, gene, analyzed_introns, allele, full_path, full_path_score, rank) %>% distinct() %>%
+  rename(gene_name = gene)
+
+# Merge the two alignments and compare
+HLA_ind_df_simple %>% inner_join(path_df_ind_simple, by=c("gene_name","analyzed_introns","sample_name","cell_line","allele","full_path")) %>%
+  ggplot(aes(x=full_path_score.x, y=full_path_score.y)) + geom_point(size=0.5) + my_custom_theme + facet_grid(kit~gene_name) +
+  scale_color_manual(values=cbPalette_long) + xlab("transcriptome alignment") + ylab("genome alignment") +
+  stat_cor(aes(label = ..r.label..), r.accuracy = 0.001, color="red")
+
+ggsave("/path/to/Figures/plots/FigS7_HLA_genome_vs_transcriptome_ind_reps.pdf",
+       width = 6,
+    height = 4,
+    units = c("in"))
+
+```
+
+```{r}
+
+# Merge the splicing orders from the merged replicates
+
+HLA_merged_df <- do.call(rbind, lapply(info_samples_merged$sample_name, function(x) {
+  if (!grepl("GM19223",x)){
+       myDF = paste("/path/to/", paste(x, "_splicing_order_paths_per_allele.hac.HLA_transcriptome.min10reads.filterND.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+  }
+}))
+
+HLA_merged_df <- HLA_merged_df %>% inner_join(info_samples_merged, by=c("sample_name"))
+
+```
+
+```{r}
+
+# Get splicing orders from genome alignment
+HLA_merged_df_simple <- HLA_merged_df %>% dplyr::select(cell_line, gene, analyzed_introns, allele, full_path, full_path_score, rank) %>% distinct() %>%
+  rename(gene_name = gene)
+
+# Compare the two alignments
+HLA_merged_df_simple %>% inner_join(diff_order_df, by=c("gene_name","analyzed_introns","cell_line","allele","full_path")) %>%
+  mutate(kit = case_when(cell_line %in% c("GM18870","GM19099","GM19102") ~ "RNA002",
+                         TRUE ~ "Xboth")) %>%
+  ggplot(aes(x=full_path_score.x, y=full_path_score.y)) + geom_point(size=0.5) + my_custom_theme + facet_grid(kit~gene_name) +
+  scale_color_manual(values=cbPalette_long) + xlab("transcriptome alignment") + ylab("genome alignment") +
+  stat_cor(aes(label = ..r.label..), r.accuracy = 0.001, color="red")
+
+ggsave("/path/to/Figures/plots/FigS7_HLA_genome_vs_transcriptome_merged_reps.pdf",
+       width = 6,
+    height = 4,
+    units = c("in"))
+
+```
+
+
+## Read counts from HLA genes
+
+```{r}
+
+# Get global read counts (allele-agnostic)
+counts_df <- do.call(rbind, lapply(info_samples_all_v2$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_read_counts_per_gene.RefSeq.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+}))
+
+counts_df <- counts_df %>% inner_join(info_samples_all_v2, by=c("sample_name")) %>%
+  separate(gene, c("gene_id"), sep="\\.", extra="drop", remove=F) %>% inner_join(gene_names_df, by="gene_id") %>%
+  group_by(gene, gene_name, cell_line, compartment) %>% summarise(count = sum(readname))
+
+```
+
+
+```{r}
+
+# Plot HLA gene expression relative to other genes
+
+HLA_count_df <- counts_df %>% filter(compartment == "chr") %>%
+  arrange(count) %>% distinct(gene_name, cell_line, compartment, .keep_all = T) %>% filter(count > 20 & gene_name %in% c("HLA-A","HLA-B","HLA-C"))
+
+counts_df %>% arrange(count) %>% filter(compartment == "chr") %>%
+  distinct(gene_name, cell_line, compartment, .keep_all = T) %>% filter(count > 20) %>%
+  ggplot(aes(x=cell_line, y=count)) + geom_boxplot(outlier.shape = NA) + my_custom_theme + scale_y_continuous(trans="log10") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  geom_point(data=HLA_count_df, aes(x=cell_line, y=count, color=gene_name)) + scale_color_manual(values=cbPalette_long[9:12])
+
+ggsave("/path/to/Figures/plots/FigS7_HLA_expression_boxplot.pdf",
+       width = 6,
+    height = 3,
+    units = c("in"))
+
+
+```
+
+
+
+```{r}
+
+# Plot allelic ratios for HLA genes
+
+expr_df %>% mutate(allele = replace(allele, allele == ".", "undetected")) %>% filter(gene_name %in% c("HLA-B","HLA-A","HLA-C")) %>%
+  group_by(gene, gene_name, cell_line, allele, compartment) %>% summarise(read_count = sum(readname)) %>%
+  spread(allele, read_count) %>% mutate(total_alleles = M + P) %>%
+  filter(total_alleles > 20 & M > 2*undetected & P > 2*undetected) %>% dplyr::select(cell_line, M, P, gene, gene_name, compartment) %>% distinct() %>% 
+  gather(allele, count, c("M","P")) %>% arrange(gene_name, cell_line) %>%
+  ggplot(aes(x=cell_line, y=count, fill=allele)) + geom_bar(stat="identity", position="fill") + my_custom_theme +
+  scale_fill_manual(values=c(cbPalette_long[1],cbPalette_long[3])) + facet_wrap(gene_name~compartment, scales="free_x", ncol=2) +
+  geom_hline(yintercept = 0.5, linetype="dotted") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggsave("/path/to/Figures/plots/FigS7_HLA_abundance_ratios.pdf",
+       width = 6,
+    height = 6,
+    units = c("in"))
+
+```
+
+
+
+## Splicing order (global)
+
+```{r}
+
+# Get significant intron groups from Python
+
+diff_order_df <- read.table("/path/to/results_files/LCLs_splicing_order_merged_samples_chi_square_vs_distance_results.txt", sep="\t", header=T)
+
+```
+
+```{r}
+
+# Compute proportion of intron groups that show allele-specific splicing order across cell lines
+HLA_d <- diff_order_df %>% filter(gene_name %in% c("HLA-A","HLA-B","HLA-C")) %>% 
+  filter(full_path_score > 0.25) %>% dplyr::select(cell_line, gene_name, gene, analyzed_introns, d, level1, level2) %>% distinct() %>%
+  mutate(category = case_when(d>d_threshold & (level1<0.05 | level2<0.05) ~ "sig",
+                              TRUE ~ "non_sig")) %>%
+  group_by(gene_name, gene, analyzed_introns, category) %>% summarise(n=n()) %>%
+  group_by(gene_name, gene, analyzed_introns) %>% mutate(freq = n/sum(n))
+  
+  
+# Identify all splicing orders with score > 0.25 that are detected in HLA genes, and plot with proportion that show allele-specific splicing order
+diff_order_df %>% filter(gene_name %in% c("HLA-A","HLA-B","HLA-C")) %>%
+  filter(full_path_score > 0.25) %>% dplyr::select(gene_name, gene, analyzed_introns, full_path) %>% distinct() %>%
+  group_by(gene_name, gene, analyzed_introns) %>% summarise(n=n()) %>%
+  inner_join(HLA_d, by=c("gene_name","gene","analyzed_introns")) %>% mutate(prop = n.x*freq) %>%
+  ggplot(aes(x=analyzed_introns, y=prop, fill=category)) + geom_bar(stat="identity") + my_custom_theme + facet_wrap(~gene_name, scales="free_x") + scale_fill_manual(values=cbPalette_long[9:16]) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylab("number of splicing orders with score > 0.25")
+
+ggsave("/path/to/Figures/plots/Fig5_HLA_splicing_order_diversity.pdf",
+       width = 6,
+    height = 3,
+    units = c("in"))
+
+
+```
+
+
+## HLA-A
+
+
+```{r}
+
+# Plot read ends as a function of splicing order in HLA-A
+
+read_ends_df %>% mutate(delta = M_mean - P_mean) %>%
+  filter(FDR < 0.05 & abs(delta) > 10 & gene == "NM_002116.7") %>% 
+  group_by(gene, cell_line) %>% summarise(M_comb = mean(M_mean), P_comb = mean(P_mean)) %>%
+  dplyr::select(gene, cell_line, M_comb, P_comb) %>%
+  gather(allele_tmp, mean_end, c("M_comb","P_comb")) %>% separate(allele_tmp, c("allele"), sep="_", extra="drop") %>%
+  inner_join(diff_order_df, by=c("gene","cell_line","allele")) %>% filter(full_path %in% c("6->7->5","7->6->5")) %>%
+  unite(allele_bis, c("cell_line","allele"), sep="_") %>%
+  ggplot(aes(x=mean_end, y=full_path_score, color=allele_bis)) + geom_point() + my_custom_theme + facet_wrap(~full_path, ncol=2) + scale_color_manual(values=cbPalette_bi_allelic) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggsave("/path/to/Figures/plots/Fig5_HLA-A_splicing_order_vs_read_end.pdf",
+       width = 5.5,
+    height = 3,
+    units = c("in"))
+
+```
+
+
+```{r}
+
+# Get individual reads from HLA-A for samples that show APA
+
+# Merge the individual reads from all the samples
+cell_lines_HLAA <- info_samples_pA %>% filter(cell_line %in% c("GM18522","GM18853","GM18861","GM19099","GM19152"))
+
+read_ends_HLAA <- do.call(rbind, lapply(cell_lines_HLAA$sample_name, function(x) {
+  myDF = paste("/path/to/", paste(x, "_read_ends_polyA_comparison.individual_reads.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x)) %>% filter(gene == "NM_002116.7")
+}))
+
+read_ends_HLAA <- read_ends_HLAA %>% inner_join(info_samples_pA, by="sample_name")
+
+```
+
+```{r}
+
+# Plot poly(A) tail length as a function of read end position in HLA-A
+
+# Function to add number of reads to plot
+give.n <- function(x){
+  return(c(y = 550, label = length(x))) 
+  # experiment with the multiplier to find the perfect position
+}
+
+read_ends_df %>% mutate(delta = M_mean - P_mean) %>%
+  filter(FDR < 0.05 & abs(delta) > 10 & gene == "NM_002116.7") %>% 
+  inner_join(read_ends_HLAA, by=c("gene","sample_name","cell_line")) %>%
+  mutate(end_bin = case_when(start <= 29945800 ~ "1st_TES",
+                             start > 29945800 ~ "2nd_TES")) %>%
+  unite(allele_bis, c("cell_line","allele"), sep="_") %>%
+  ggplot(aes(x=allele_bis, y=polya_length, fill=end_bin)) + geom_boxplot(outlier.size=0.5) + my_custom_theme + scale_fill_manual(values=cbPalette_long[10:14]) + ylim(0,600) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + stat_summary(fun.data = give.n, geom = "text", fun.y = median, position = position_dodge(width = 0.75), angle=90)
+
+
+ggsave("/path/to/Figures/plots/Fig5_HLA-A_pA_vs_read_end.pdf",
+       width = 6,
+    height = 3,
+    units = c("in"))
+
+```
+
+```{r}
+
+# Test difference in poly(A) tail length between proximal and distal read ends
+
+read_ends_df %>% mutate(delta = M_mean - P_mean) %>%
+  filter(FDR < 0.05 & abs(delta) > 10 & gene == "NM_002116.7") %>% 
+  inner_join(read_ends_HLAA, by=c("gene","sample_name","cell_line")) %>%
+  mutate(end_bin = case_when(start <= 29945800 ~ "1st_TES",
+                             start > 29945800 ~ "2nd_TES")) %>%
+  unite(allele_bis, c("cell_line","allele"), sep="_") %>%
+  group_by(allele_bis) %>% summarise(pval_wilcox = wilcox.test(polya_length ~ end_bin)$p.value) %>%
+  mutate(padj = p.adjust(pval_wilcox, method="BH"))
+
+```
+
+## HLA-C
+
+```{r}
+
+# Merge the AS events in HLA-C from all the samples (except those for which alleles could not be distinguished)
+HLA_AS_df <- do.call(rbind, lapply(info_samples_merged$sample_name, function(x) {
+  if (!grepl("GM19223",x) & (!grepl("GM18853",x))){
+       myDF = paste("/path/to/", paste(x, "_AS_events.HLA-C.txt", sep=""), sep="")
+  df = read.table(myDF, header=T, sep="\t") %>% mutate(sample_name = paste(x))
+  }
+}))
+
+HLA_AS_df <- HLA_AS_df %>% inner_join(info_samples_merged, by=c("sample_name"))
+
+```
+
+
+```{r}
+
+# Plot proportion of AS exon 4 in HLA-C
+
+HLA_AS_df %>% mutate(ratio_M = count_M_other / (count_M_YES+count_M_other), ratio_P = count_P_other / (count_P_YES+count_P_other)) %>% 
+  mutate(ratio_M_bis = round(ratio_M,2), ratio_P_bis = round(ratio_P,2)) %>%
+  filter(FDR < 0.05  & intron_number > 1 & ((ratio_M_bis >= 0.1 | ratio_P_bis >= 0.1) & (ratio_M_bis <= 0.1 | ratio_P_bis <= 0.1)) & abs(ratio_M_bis - ratio_P_bis) >= 0.1) %>% arrange(FDR) %>% 
+  filter(gene_name == "HLA-C" & intron_number == 4) %>% 
+  mutate(ratio_M = count_M_other / (count_M_YES+count_M_other), ratio_P = count_P_other / (count_P_YES+count_P_other)) %>%
+  gather(allele, ratio_AS, c("ratio_M","ratio_P")) %>%
+  ggplot(aes(x=cell_line, y=ratio_AS, fill=allele)) + geom_bar(stat="identity", position="dodge") + my_custom_theme + scale_fill_manual(values=c(cbPalette_long[1],cbPalette_long[3]))
+
+ggsave("/path/to/Figures/plots/Fig5_HLA-C_AS_bar_plot.pdf",
+       width = 5.5,
+    height = 2,
+    units = c("in"))
+
+```
+
+```{r}
+
+# Extract splicing order for HLA-C
+splice_order_HLAC_simple <- diff_order_df %>% filter(gene_name == "HLA-C" & analyzed_introns == "6_5_4") %>%
+  distinct(gene_name, cell_line, allele, analyzed_introns, full_path, full_path_score, rank)
+
+```
+
+
+
+```{r}
+
+# Plot splicing order as a function of AS in HLA-C
+
+HLAC_alleles <- data.frame(c("GM18501","GM18510","GM19144","GM19209"),c("16:01","04:01","03:02","08:04"), c("08:02","07:06","04:01","16:01"))
+colnames(HLAC_alleles) <- c("cell_line","allele1","allele2")
+
+
+splice_order_HLAC_simple %>% separate(full_path, c("spliced1","spliced2","spliced3"), sep="->", convert=T) %>% drop_na() %>%
+  mutate(splice_pos = case_when(spliced1 == 4 ~ "spliced_1st",
+                                spliced2 == 4 ~ "spliced_2nd",
+                                spliced3 == 4 ~ "spliced3rd")) %>% 
+  inner_join(HLAC_alleles, by="cell_line") %>%
+  mutate(new_allele = case_when(allele == "M" ~ allele1,
+                                allele == "P" ~ allele2)) %>%
+  mutate(new_allele_bis = case_when(new_allele == "16:01" ~ "16:01",
+                                    new_allele == "04:01" ~ "04:01",
+                                    TRUE ~ "other")) %>%
+  group_by(cell_line, analyzed_introns, new_allele_bis, splice_pos) %>% summarise(score = sum(full_path_score)) %>%
+  ggplot(aes(x=splice_pos, y=score, fill=new_allele_bis)) + geom_bar(stat="identity", position="dodge") + my_custom_theme + scale_fill_manual(values=cbPalette_long) + facet_wrap(~cell_line, ncol=4) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_manual(values=c(cbPalette_long[2],cbPalette_long[6],cbPalette_long[8]))
+
+ggsave("/path/to/Figures/plots/Fig5_HLA-C_splicing_order_vs_AS.pdf",
+       width = 5.5,
+    height = 2.5,
+    units = c("in"))
+
+```
+
+
+
+
