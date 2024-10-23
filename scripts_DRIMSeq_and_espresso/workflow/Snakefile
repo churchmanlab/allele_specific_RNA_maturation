@@ -1,0 +1,14 @@
+configfile: 'config/config.yaml'
+
+include: 'rules/DRIMseq.smk'
+
+
+WC = glob_wildcards('data/splicing_order_stringent_version/replicates_separate_esp_format/{sample}_GM19209_interm_counts_per_allele.hac.all_introns.min10reads.filterND.stringent.3_isoforms.esp.txt')
+
+rule all:
+    input:
+        drimseq_allele=expand('results/detect_differential_isoforms_interm_counts_per_allele/{sample}/differential_transcripts.tsv', sample=WC.sample),
+        iso_dif=expand('results/classify_isoform_differences/isoform_differences_{main_tx_id}_to_{second_tx_id}.tsv',
+        zip,
+        main_tx_id=config['main_transcript_id'],
+        second_tx_id=config['second_transcript_id'])

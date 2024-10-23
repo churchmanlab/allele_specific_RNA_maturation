@@ -1,0 +1,33 @@
+cluster:
+  bash profile/slurm/slurm_submit.sh
+  '--account=def-kchoquet
+  --mail-user=louis-philippe.chaumont@usherbrooke.ca
+  --mail-type=FAIL
+  --job-name={rule}-{wildcards}
+  --mem={resources.mem_gb}G
+  --time={resources.time}
+  --cpus-per-task={threads}
+  --output=logs_slurm/{rule}/%j-{rule}-{wildcards}.log'
+  '{rule}' '{wildcards}' '{dependencies}'
+
+default-resources:
+  - mem_gb=4
+  - time='0-1:00' # needs quote
+
+set-resources:
+  - detect_differential_isoforms:mem_gb=8
+  - detect_differential_isoforms:time=0-1:00
+
+set-threads: 
+  - detect_differential_isoforms=8
+
+immediate-submit: True
+jobs: 999 # max number of jobs concurrently submitted to the cluster
+use-conda: True
+conda-frontend: mamba
+use-envmodules: False
+keep-going: True
+notemp: True
+printshellcmds: True
+rerun-triggers: mtime
+verbose: False

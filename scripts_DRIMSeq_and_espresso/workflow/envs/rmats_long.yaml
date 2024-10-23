@@ -1,0 +1,7 @@
+channels:
+  - conda-forge
+  - bioconda
+
+dependencies:
+  - rmats-long=1.0.0
+  - r-ggrepel=0.9.5
